@@ -2,16 +2,31 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [1.2.0] - 2026-10-14
+
+First release of the [lifwsp/dsh-custom-fonts](https://github.com/lifwsp/dsh-custom-fonts) fork.
 
 ### Added
 
-- **Preferences now persist.** The four settings (UI English font, UI Chinese font, code font, size offset) are stored in the Host settings document under the `dsh-custom-fonts` namespace and re-applied on load, so they survive a page reload and a restart. Previously they lived only in the bundle closure and were lost on every reload.
-- A minimal host half: it declares the settings schema (`Config`, every field `.volatile()`) and nothing else. `inject` is deliberately empty — declaring `settings` there would make the plugin's fiber wait for the settings service and never activate.
+- **Preferences now persist** (from [PR #1](https://github.com/lsh2002/dsh-custom-fonts/pull/1) by @tom613951). The four settings (UI English font, UI Chinese font, code font, size offset) are stored in the Host settings document under the `dsh-custom-fonts` namespace and re-applied on load, so they survive a page reload and a restart. Previously they lived only in the bundle closure and were lost on every reload.
+- A minimal host half (PR #1): it declares the settings schema (`Config`, every field `.volatile()`) and nothing else. `inject` is deliberately empty — declaring `settings` there would make the plugin's fiber wait for the settings service and never activate. Fields now carry English descriptions.
+- Save status line on the settings page: saving, saved, and clear error messages when a save fails, is refused, or is not possible on this connection.
+- `npm test` runs an extended `scripts/verify.mjs` covering persistence, reset, malformed data, error handling, unload, and untranslated text.
 
 ### Changed
 
-- The browser half injects `configForms` and reads the namespace through `configForms.get('dsh-custom-fonts')`; each control writes its value back through the same form. Live application is unchanged — edits still take effect immediately.
+- **The settings page is now in English** (section label **Fonts**, field labels, placeholders, tooltips, buttons, status messages). Chinese font names and the Chinese preview sentence are kept on purpose.
+- The browser half injects `configForms` and reads the namespace through `configForms.get('dsh-custom-fonts')` (PR #1). Edits still apply immediately, but writes are now debounced (400 ms) and sent as one atomic `mutate`, instead of one write per keystroke and field. A pending edit is flushed on `pagehide` and on unload.
+- Stored values from the Host and local edits are reconciled: a Host refresh no longer overwrites an edit that is still waiting to be saved.
+- **Restore defaults** now `unset`s the stored fields (falling back to the defaults) instead of writing empty values.
+- Stored values are validated before use: wrong types fall back to defaults, and the size offset is clamped to -4..+8.
+- `@deepseek-ai/schemastery` is a `peerDependency` (provided by DSH, as in the official subscriptions plugin) plus a `devDependency` for tests, instead of a regular dependency.
+- Package metadata points to the fork and lists the original author and contributors.
+
+### Fixed
+
+- Font names containing `;`, `{`, `}`, `<`, `>`, `\`, or line breaks can no longer break out of the injected CSS rule. Mismatched quotes are normalized.
+- The settings page now re-renders when stored settings arrive or change while it is open (previously it only read state on mount).
 
 ## [1.1.0] - 2026-08-24
 

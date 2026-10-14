@@ -2,6 +2,10 @@
 
 How this plugin gets released and listed.
 
+> **Fork note:** The listing paths below (`lsh2002__dsh-custom-fonts.yml`, the `lsh2002` repository URL) belong to the upstream project. If this fork is ever listed separately, use `lifwsp__dsh-custom-fonts.yml` and `https://github.com/lifwsp/dsh-custom-fonts`, and choose a distinct npm package name to avoid clashing with the upstream `dsh-custom-fonts`.
+>
+> **Before any release:** start DSH with the plugin installed, set a font, reload the page, restart DSH, and confirm the font is restored. `npm install` first so the smoke test can import the host half (it needs `@deepseek-ai/schemastery`).
+
 ## 1. Release checklist
 
 1. Bump `version` in `package.json` and add a CHANGELOG entry.

@@ -4,6 +4,10 @@
 
 [English](README.md)
 
+> **Note (fork):** This Chinese README is kept from the upstream project and describes version 1.1. Since 1.2.0 the settings page is in English, settings are saved automatically, and the plugin has a host half that needs a DSH restart after installation. See [README.md](README.md) for the current documentation.
+>
+> **说明（分支）：** 本中文说明保留自上游项目，描述的是 1.1 版。自 1.2.0 起，设置页界面为英文，设置会自动保存，并新增宿主端（安装后需重启 DSH）。最新说明请参阅 [README.md](README.md)。
+
 ## 功能
 
 纯客户端插件（无宿主端，无需重启）。安装后在 **设置 → 字体** 新增设置页：
