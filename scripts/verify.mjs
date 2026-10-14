@@ -184,7 +184,7 @@ function mountClient(form, sheets) {
     surface, dom, effects, registrations, page,
     unload: () => { for (const dispose of effects.reverse()) if (typeof dispose === 'function') dispose() },
     status: () => findAll(page(), (n) => n.props && n.props.role === 'status')[0],
-    input: (listId) => findAll(page(), (n) => n.type === 'input' && n.props.list === listId)[0],
+    input: (listId) => findAll(page(), (n) => n.type === 'input' && n.props.id === listId + '-input')[0],
     slider: () => findAll(page(), (n) => n.type === 'input' && n.props.type === 'range')[0],
     button: (label) => findAll(page(), (n) => n.type === 'button' && n.children.includes(label))[0],
   }
@@ -504,12 +504,71 @@ await check('settings page UI text is English (no untranslated Chinese)', async 
 
 await check('client source has no Chinese outside font names and the preview sample', async () => {
   const source = readFileSync(join(root, 'client', 'client.js'), 'utf8')
-  const fontLists = /const (LATIN|CJK|CODE)_FONTS = \[[\s\S]*?\]/g
+  const fontLists = /const (LATIN|CJK|CODE)_FONTS = \[[\s\S]*?\]|const FONT_ALIASES = \{[\s\S]*?\n    \}/g
   const stripped = source.replace(fontLists, '').replace(/'日本語：[^']*'|'中文：[^']*'|'한국어:[^']*'/g, '')
   const match = stripped.match(/[\u3400-\u9fff]+/)
   assert(match === null, `Chinese text left in client source: ${match && match[0]}`)
 })
 
+// --- font search helpers: extracted from the client source ----------------
+function loadHelpers() {
+  const source = readFileSync(join(root, 'client', 'client.js'), 'utf8')
+  const aliases = source.match(/const FONT_ALIASES = \{[\s\S]*?\n    \}/)[0]
+  const block = source.match(/\/\/ BEGIN pure font helpers[^\n]*\n([\s\S]*?)\/\/ END pure font helpers/)[1]
+  return new Function(`${aliases}\n${block}\nreturn { foldText, filterFonts, splitLastToken, readFontFileNames, localNames, aliasesOf }`)()
+}
+
+await check('font search: Japanese names, width forms, kana, separators', async () => {
+  const h = loadHelpers()
+  const pool = ['Arial', 'Meiryo', 'MS Gothic', 'Yu Gothic', 'Yu Mincho', 'Noto Sans CJK JP']
+  const names = (q) => h.filterFonts(pool, q, 50).map((m) => m.name)
+  assert(names('游ゴシック').join() === 'Yu Gothic', `游ゴシック -> ${names('游ゴシック')}`)
+  assert(names('めいりお').join() === 'Meiryo', 'hiragana should match katakana alias')
+  assert(names('ＭＳ').includes('MS Gothic'), 'full-width ＭＳ should match MS Gothic')
+  assert(names('ms gothic').join() === 'MS Gothic' && names('msgothic').join() === 'MS Gothic', 'separators ignored')
+  assert(names('YU').join() === 'Yu Gothic,Yu Mincho', 'prefix matches keep order')
+  assert(names('gothic').join() === 'MS Gothic,Yu Gothic', 'substring matches')
+  const hit = h.filterFonts(pool, '明朝', 50)[0]
+  assert(hit.name === 'Yu Mincho' && hit.alias === '游明朝', 'alias shown for the matching name')
+  assert(h.filterFonts(pool, 'zzz', 50).length === 0, 'no false positives')
+  assert(h.filterFonts(pool, '', 3).length === 3, 'limit applies to the empty query')
+})
+
+await check('font search: comma-separated lists complete the last entry only', async () => {
+  const h = loadHelpers()
+  assert(JSON.stringify(h.splitLastToken('Inter, Se')) === JSON.stringify({ head: 'Inter, ', query: 'Se' }), 'split')
+  assert(JSON.stringify(h.splitLastToken('Yu')) === JSON.stringify({ head: '', query: 'Yu' }), 'single')
+})
+
+await check('font file reader: finds Japanese family names in TrueType and TTC data', async () => {
+  const h = loadHelpers()
+  const utf16 = (text) => { const b = Buffer.alloc(text.length * 2); for (let i = 0; i < text.length; i++) b.writeUInt16BE(text.charCodeAt(i), i * 2); return b }
+  const makeFont = (family, local, fontOffset = 0) => {
+    const strings = [utf16(family), utf16(local)]
+    const records = [[3, 1, 0x409, 1, 0], [3, 1, 0x411, 1, strings[0].length]]
+    const nameLen = 6 + 12 * 2 + strings[0].length + strings[1].length
+    const name = Buffer.alloc(nameLen)
+    name.writeUInt16BE(0, 0); name.writeUInt16BE(2, 2); name.writeUInt16BE(6 + 24, 4)
+    records.forEach((r, i) => {
+      ;[r[0], r[1], r[2], r[3], i === 0 ? strings[0].length : strings[1].length, r[4]].forEach((v, k) => name.writeUInt16BE(v, 6 + 12 * i + 2 * k))
+    })
+    strings[0].copy(name, 30); strings[1].copy(name, 30 + strings[0].length)
+    const dir = Buffer.alloc(12 + 16)
+    dir.writeUInt32BE(0x00010000, 0); dir.writeUInt16BE(1, 4)
+    dir.write('name', 12, 'latin1'); dir.writeUInt32BE(fontOffset + 28, 20); dir.writeUInt32BE(nameLen, 24)
+    return Buffer.concat([dir, name])
+  }
+  const single = new Blob([makeFont('Yu Gothic', '游ゴシック')])
+  const one = await h.readFontFileNames(single)
+  assert(one.length === 1 && one[0].names[0] === 'Yu Gothic' && one[0].locals[0] === '游ゴシック', `single: ${JSON.stringify(one)}`)
+  const f1 = makeFont('Meiryo', 'メイリオ', 20), f2 = makeFont('Meiryo UI', 'メイリオ UI', 20 + makeFont('Meiryo', 'メイリオ').length)
+  const ttcHead = Buffer.alloc(20)
+  ttcHead.write('ttcf', 0, 'latin1'); ttcHead.writeUInt32BE(0x10000, 4); ttcHead.writeUInt32BE(2, 8)
+  ttcHead.writeUInt32BE(20, 12); ttcHead.writeUInt32BE(20 + f1.length, 16)
+  const ttc = await h.readFontFileNames(new Blob([Buffer.concat([ttcHead, f1, f2])]))
+  assert(ttc.length === 2 && ttc[1].names[0] === 'Meiryo UI' && ttc[1].locals[0] === 'メイリオ UI', `ttc: ${JSON.stringify(ttc)}`)
+  assert((await h.readFontFileNames(new Blob([Buffer.from('not a font file!')]))).length === 0, 'garbage ignored')
+})
 // --- manifest self-consistency -------------------------------------------
 await check('package.json dsh fields are consistent', async () => {
   const manifest = require(join(root, 'package.json'))

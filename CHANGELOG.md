@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+- **Suggestions are drawn in their own typeface, and Japanese names work.** Each suggested family is previewed in that font. Typing a localized name (for example 游ゴシック, メイリオ, ＭＳ ゴシック, 明朝) finds the family and shows the localized name next to it. Search ignores case, spaces, full/half-width and hiragana/katakana differences. Localized names come from a built-in table of well-known fonts plus the name table read from the installed font files after detection (no data leaves the browser).
+- **Installed-font suggestions.** A **Detect installed fonts** button reads the fonts installed on the device (Local Font Access API, Chrome/Edge) and the font fields then suggest matching families as you type (case-insensitive, partial match, works per entry in a comma-separated list). Fonts that are not installed are flagged under the field. Browsers without the API keep the built-in common-name suggestions.
 - **Fix the font size offset growing with DOM depth.** The old `body, body * { font-size: calc(1em + N) }` rule added the offset again at every nesting level, so a small change made deeply nested text jump (at +2 px, 8-deep text went from 14 px to 38 px). The offset is now added once, only to rules that declare an absolute size, with line-height following along; relative sizes (`em`, `%`) keep their ratio, and an offset of 0 injects nothing.
 - The font size offset now moves in 0.5 px steps. Stored integer offsets keep working; non-numeric stored values fall back to 0.
 - Dragging the slider only updates a CSS variable, keeping the live preview fast. The settings page's own text follows the offset too.

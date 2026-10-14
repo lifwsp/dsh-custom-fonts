@@ -65,6 +65,238 @@ window.__ModuleLoader__.load({
       'DejaVu Sans Mono', 'Sarasa Mono J', 'Sarasa Mono SC', 'Sarasa Mono K',
     ]
 
+    // ---------------------------------------------------------------------
+    // Installed-font detection (Local Font Access API, Chromium only)
+    // ---------------------------------------------------------------------
+
+    /** Families that are always valid in CSS and never "missing". */
+    const GENERIC_FAMILIES = new Set([
+      'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui',
+      'ui-serif', 'ui-sans-serif', 'ui-monospace', 'ui-rounded', 'emoji', 'math', 'fangsong',
+    ])
+    /**
+     * Localized names of well-known fonts, used before (or without) a scan so
+     * that e.g. typing a Japanese name finds the English family. A scan adds
+     * the names stored inside each installed font file on top of these.
+     */
+    const FONT_ALIASES = {
+      'Yu Gothic': ['游ゴシック'], 'Yu Gothic UI': ['游ゴシック UI'], 'Yu Mincho': ['游明朝'],
+      'Meiryo': ['メイリオ'], 'Meiryo UI': ['メイリオ UI'],
+      'MS Gothic': ['ＭＳ ゴシック'], 'MS PGothic': ['ＭＳ Ｐゴシック'], 'MS UI Gothic': ['ＭＳ UI ゴシック'],
+      'MS Mincho': ['ＭＳ 明朝'], 'MS PMincho': ['ＭＳ Ｐ明朝'],
+      'BIZ UDGothic': ['BIZ UDゴシック'], 'BIZ UDPGothic': ['BIZ UDPゴシック'],
+      'BIZ UDMincho': ['BIZ UD明朝'], 'BIZ UDPMincho': ['BIZ UDP明朝'],
+      'Hiragino Sans': ['ヒラギノ角ゴシック'], 'Hiragino Kaku Gothic ProN': ['ヒラギノ角ゴ ProN'],
+      'Hiragino Mincho ProN': ['ヒラギノ明朝 ProN'], 'Hiragino Maru Gothic ProN': ['ヒラギノ丸ゴ ProN'],
+      'Noto Sans CJK JP': ['源ノ角ゴシック', 'Source Han Sans'], 'Noto Serif CJK JP': ['源ノ明朝', 'Source Han Serif'],
+      'Microsoft YaHei': ['微软雅黑'], 'SimSun': ['宋体'], 'SimHei': ['黑体'], 'KaiTi': ['楷体'], 'FangSong': ['仿宋'],
+      'Microsoft JhengHei': ['微軟正黑體'], 'PingFang SC': ['苹方'], 'PingFang TC': ['蘋方'],
+      'Malgun Gothic': ['맑은 고딕'], 'Apple SD Gothic Neo': ['애플 SD 산돌고딕 Neo'],
+    }
+
+    // BEGIN pure font helpers (extracted and unit-tested by scripts/verify.mjs)
+
+    /** Names read from installed font files: English family -> localized names. */
+    const localNames = new Map()
+
+    function aliasesOf(name) {
+      const out = []
+      for (const list of [FONT_ALIASES[name], localNames.get(name)]) {
+        for (const alias of list || []) if (alias !== name && !out.includes(alias)) out.push(alias)
+      }
+      return out
+    }
+
+    /**
+     * Fold text for forgiving search: width/compatibility forms (ＭＳ -> MS),
+     * case, hiragana vs. katakana, and separators (so "yugothic" finds "Yu Gothic").
+     */
+    function foldText(text) {
+      return String(text).normalize('NFKC').toLowerCase()
+        .replace(/[\u30a1-\u30f6]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0x60))
+        .replace(/[\s\-_.・･]+/g, '')
+    }
+
+    /** Split "Inter, Se" into the part to keep ("Inter, ") and the token being typed ("Se"). */
+    function splitLastToken(value) {
+      const cut = String(value).lastIndexOf(',')
+      if (cut < 0) return { head: '', query: String(value).trim() }
+      return { head: String(value).slice(0, cut + 1).replace(/\s*$/, ' '), query: String(value).slice(cut + 1).trim() }
+    }
+
+    /**
+     * Suggestions for a query, as { name, alias } (`alias` is the localized
+     * name to show next to the family, preferring the one that matched).
+     * Order: name prefix, alias prefix, name substring, alias substring.
+     */
+    function filterFonts(pool, query, limit) {
+      const q = foldText(query)
+      const out = []
+      if (q === '') {
+        for (const name of pool.slice(0, limit)) out.push({ name, alias: aliasesOf(name)[0] || '' })
+        return out
+      }
+      const buckets = [[], [], [], []]
+      for (const name of pool) {
+        const at = foldText(name).indexOf(q)
+        if (at === 0) { buckets[0].push({ name, alias: aliasesOf(name)[0] || '' }); continue }
+        let hit = ''
+        let aliasAt = -1
+        for (const alias of aliasesOf(name)) {
+          const i = foldText(alias).indexOf(q)
+          if (i >= 0 && (aliasAt < 0 || i < aliasAt)) { aliasAt = i; hit = alias }
+        }
+        if (aliasAt === 0) buckets[1].push({ name, alias: hit })
+        else if (at > 0) buckets[2].push({ name, alias: aliasesOf(name)[0] || '' })
+        else if (aliasAt > 0) buckets[3].push({ name, alias: hit })
+      }
+      return buckets.flat().slice(0, limit)
+    }
+
+    /**
+     * Read the family names stored in a font file (name IDs 1 and 16, every
+     * language) from its `name` table, touching only a few KB of the file.
+     * Handles single fonts and .ttc collections. Returns [{ names, locals }]:
+     * the English family names and the other-language names of each font.
+     */
+    async function readFontFileNames(blob) {
+      const out = []
+      const read = async (from, to) => new DataView(await blob.slice(from, to).arrayBuffer())
+      const head = await read(0, 12)
+      if (head.byteLength < 12) return out
+      const tag = head.getUint32(0)
+      let offsets = [0]
+      if (tag === 0x74746366) { // 'ttcf'
+        const count = Math.min(head.getUint32(8), 64)
+        const table = await read(12, 12 + 4 * count)
+        offsets = []
+        for (let i = 0; i * 4 + 4 <= table.byteLength; i++) offsets.push(table.getUint32(i * 4))
+      } else if (tag !== 0x00010000 && tag !== 0x4f54544f && tag !== 0x74727565) {
+        return out
+      }
+      for (const base of offsets) {
+        const header = await read(base, base + 12)
+        if (header.byteLength < 12) continue
+        const numTables = header.getUint16(4)
+        const dir = await read(base + 12, base + 12 + 16 * numTables)
+        let at = -1
+        let length = 0
+        for (let i = 0; i * 16 + 16 <= dir.byteLength; i++) {
+          if (dir.getUint32(i * 16) === 0x6e616d65) { at = dir.getUint32(i * 16 + 8); length = dir.getUint32(i * 16 + 12); break }
+        }
+        if (at < 0) continue
+        const nt = await read(at, at + Math.min(length, 262144))
+        if (nt.byteLength < 6) continue
+        const count = nt.getUint16(2)
+        const strings = nt.getUint16(4)
+        const english = []
+        const locals = []
+        for (let r = 0; r < count && 6 + 12 * r + 12 <= nt.byteLength; r++) {
+          const rec = 6 + 12 * r
+          const platform = nt.getUint16(rec), lang = nt.getUint16(rec + 4), id = nt.getUint16(rec + 6)
+          const len = nt.getUint16(rec + 8), off = strings + nt.getUint16(rec + 10)
+          if (platform !== 3 || (id !== 1 && id !== 16) || off + len > nt.byteLength) continue
+          let text = ''
+          for (let j = 0; j + 1 < len; j += 2) text += String.fromCharCode(nt.getUint16(off + j))
+          text = text.trim()
+          if (text === '') continue
+          const list = (lang & 0xff) === 0x09 ? english : locals
+          if (!list.includes(text)) list.push(text)
+        }
+        if (english.length > 0) out.push({ names: english, locals })
+      }
+      return out
+    }
+
+    // END pure font helpers
+
+    /**
+     * `status`: idle (not asked yet) | loading | ready | denied | unsupported | error.
+     * `families` is the sorted list of installed family names once ready.
+     */
+    const fontScan = { status: 'idle', families: [], lower: new Set(), message: '' }
+    let scanPromise = null
+    const MAX_SUGGESTIONS = 50
+
+    function localFontsSupported() {
+      return typeof window !== 'undefined' && typeof window.queryLocalFonts === 'function'
+    }
+
+    /** In the background, learn each installed family's localized names. */
+    async function learnLocalNames(faces) {
+      const firstFace = new Map()
+      for (const face of faces) if (face && face.family && !firstFace.has(face.family)) firstFace.set(face.family, face)
+      const queue = [...firstFace.values()]
+      let done = 0
+      const worker = async () => {
+        while (queue.length > 0) {
+          const face = queue.shift()
+          if (localNames.has(face.family) || typeof face.blob !== 'function') continue
+          try {
+            const entries = await readFontFileNames(await face.blob())
+            for (const { names, locals } of entries) for (const name of names) if (!localNames.has(name)) localNames.set(name, locals)
+          } catch (error) { /* unreadable font: English name only */ }
+          if (!localNames.has(face.family)) localNames.set(face.family, [])
+          if (++done % 25 === 0) notify()
+        }
+      }
+      await Promise.all([worker(), worker(), worker(), worker()])
+      notify()
+    }
+
+    function scanInstalledFonts() {
+      if (scanPromise !== null) return scanPromise
+      if (!localFontsSupported()) {
+        fontScan.status = 'unsupported'
+        notify()
+        return Promise.resolve(false)
+      }
+      fontScan.status = 'loading'
+      notify()
+      scanPromise = Promise.resolve()
+        .then(() => window.queryLocalFonts())
+        .then((faces) => {
+          const names = new Set()
+          for (const face of faces || []) if (face && face.family) names.add(String(face.family))
+          fontScan.families = [...names].sort((a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' }))
+          fontScan.lower = new Set(fontScan.families.map((name) => name.toLowerCase()))
+          fontScan.status = 'ready'
+          void learnLocalNames(faces || [])
+          return true
+        })
+        .catch((error) => {
+          const name = error && error.name
+          fontScan.status = name === 'NotAllowedError' || name === 'SecurityError' ? 'denied' : 'error'
+          fontScan.message = error && error.message ? String(error.message) : ''
+          return false
+        })
+        .then((ok) => { scanPromise = null; notify(); return ok })
+      return scanPromise
+    }
+
+    /** Scan without a prompt when the browser already granted access. */
+    function autoScanIfGranted() {
+      if (fontScan.status !== 'idle' || !localFontsSupported()) return
+      try {
+        const nav = typeof navigator !== 'undefined' ? navigator : null
+        if (!nav || !nav.permissions || typeof nav.permissions.query !== 'function') return
+        nav.permissions.query({ name: 'local-fonts' }).then((result) => {
+          if (result && result.state === 'granted') void scanInstalledFonts()
+        }, () => {})
+      } catch (error) { /* permission name unsupported: user clicks the button */ }
+    }
+
+    /** Entered font names that are not installed (only once the scan is ready). */
+    function missingFonts(value) {
+      if (fontScan.status !== 'ready') return []
+      return String(value).split(',')
+        .map((part) => part.trim().replace(/^["']|["']$/g, ''))
+        .filter((name) => {
+          if (name === '' || GENERIC_FAMILIES.has(name.toLowerCase()) || fontScan.lower.has(name.toLowerCase())) return false
+          const folded = foldText(name)
+          return !fontScan.families.some((family) => aliasesOf(family).some((alias) => foldText(alias) === folded))
+        })
+    }
     // Turn user input (comma-separated font lists allowed) into quoted CSS.
     // Characters that could end the declaration or the <style> element are
     // dropped, since values may also come from a hand-edited settings file.
@@ -632,22 +864,130 @@ window.__ModuleLoader__.load({
       fontSize: px(14), outline: 'none',
     }
 
+    /** Draw el's text in the given family (overrides the global !important rule). */
+    function previewFace(el, family) {
+      if (el && el.style) el.style.setProperty('font-family', quoteList(family) + ', sans-serif', 'important')
+    }
+
+    const suggestListStyle = {
+      position: 'absolute', left: 0, right: 0, top: '100%', marginTop: 4, zIndex: 50,
+      maxHeight: 240, overflowY: 'auto', margin: '4px 0 0', padding: 4, listStyle: 'none',
+      borderRadius: 8, border: '1px solid var(--dsw-alias-border-l1)',
+      background: 'var(--dsw-alias-bg-layer-2)', boxShadow: '0 8px 24px rgba(0, 0, 0, 0.18)',
+    }
+
     function Field(props) {
       const inputId = props.listId + '-input'
+      const [open, setOpen] = useState(false)
+      const [active, setActive] = useState(-1)
+      // Installed fonts once detected; otherwise the built-in common names.
+      const pool = fontScan.status === 'ready' ? fontScan.families : props.options
+      const { head, query } = splitLastToken(props.value)
+      const matches = open ? filterFonts(pool, query, MAX_SUGGESTIONS) : []
+      const missing = missingFonts(props.value)
+
+      function choose(name) {
+        props.onChange({ target: { value: head + name } })
+        setOpen(false)
+        setActive(-1)
+      }
+      function onKeyDown(e) {
+        if (e.key === 'Escape') { setOpen(false); return }
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          if (!open) { setOpen(true); return }
+          if (matches.length === 0) return
+          e.preventDefault()
+          const step = e.key === 'ArrowDown' ? 1 : -1
+          setActive((active + step + matches.length) % matches.length)
+          return
+        }
+        if (e.key === 'Enter' && open && active >= 0 && active < matches.length) {
+          e.preventDefault()
+          choose(matches[active].name)
+        }
+      }
+      const keepFocus = (e) => { if (e.preventDefault) e.preventDefault() }
+
       return createElement('div', { style: { marginBottom: 14 } },
         createElement('label', { htmlFor: inputId, style: fieldLabelStyle, title: props.hint }, props.label),
-        createElement('input', {
-          id: inputId, type: 'text', list: props.listId, value: props.value,
-          placeholder: props.placeholder, onChange: props.onChange, title: props.hint,
-          spellCheck: false, autoComplete: 'off',
-          style: inputStyle,
-        }),
-        createElement('datalist', { id: props.listId },
-          props.options.map((name) => createElement('option', { key: name, value: name }))
+        createElement('div', { style: { position: 'relative' } },
+          createElement('input', {
+            id: inputId, type: 'text', value: props.value,
+            placeholder: props.placeholder, title: props.hint,
+            role: 'combobox', 'aria-expanded': open && matches.length > 0, 'aria-autocomplete': 'list',
+            spellCheck: false, autoComplete: 'off',
+            onChange: (e) => { props.onChange(e); setOpen(true); setActive(-1) },
+            onFocus: () => { setOpen(true) },
+            onBlur: () => { setOpen(false); setActive(-1) },
+            onKeyDown,
+            style: { ...inputStyle, paddingRight: 30 },
+          }),
+          createElement('span', {
+            'aria-hidden': 'true', onMouseDown: (e) => { keepFocus(e); setOpen(!open) },
+            style: {
+              position: 'absolute', right: 0, top: 0, bottom: 0, width: 30, display: 'flex',
+              alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
+              fontSize: px(10), color: 'var(--dsw-alias-label-secondary)',
+            },
+          }, '\u25BC'),
+          matches.length > 0 && createElement('ul', { role: 'listbox', onMouseDown: keepFocus, style: suggestListStyle },
+            matches.map((item, i) => createElement('li', {
+              key: item.name, role: 'option', 'aria-selected': i === active,
+              onMouseDown: (e) => { keepFocus(e); choose(item.name) },
+              onMouseEnter: () => { setActive(i) },
+              style: {
+                padding: '6px 8px', borderRadius: 6, cursor: 'pointer', fontSize: px(14),
+                display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap',
+                color: 'var(--dsw-alias-label-primary)',
+                background: i === active ? 'var(--dsw-alias-bg-layer-3, rgba(127, 127, 127, 0.18))' : 'transparent',
+              },
+            },
+              // Each family is drawn in its own typeface. An inline !important
+              // is needed to beat the page-wide `font-family ... !important`.
+              createElement('span', { ref: (el) => { previewFace(el, item.name) } }, item.name),
+              item.alias !== '' && createElement('span', {
+                ref: (el) => { previewFace(el, item.name) },
+                style: { fontSize: px(12), color: 'var(--dsw-alias-label-secondary)' },
+              }, item.alias),
+            )),
+          ),
         ),
+        missing.length > 0 && createElement('div', {
+          role: 'alert',
+          style: { marginTop: 4, fontSize: px(12), lineHeight: 1.5, color: 'var(--dsw-alias-label-secondary)' },
+        }, 'Not found on this device: ' + missing.join(', ') + '. It will be ignored unless it is a web font.'),
       )
     }
 
+    function FontDetectBar() {
+      const status = fontScan.status
+      let text
+      if (status === 'ready') text = fontScan.families.length + ' installed fonts detected. Type to search, or pick from the list.'
+      else if (status === 'loading') text = 'Detecting installed fonts…'
+      else if (status === 'unsupported') text = 'This browser cannot list installed fonts, so only common font names are suggested. Use a Chromium-based browser (Chrome or Edge) for full suggestions.'
+      else if (status === 'denied') text = 'Permission to read installed fonts was denied. Allow it in the site settings (Fonts / Local fonts) and try again.'
+      else if (status === 'error') text = 'Could not read installed fonts' + (fontScan.message ? ' (' + fontScan.message + ')' : '') + '.'
+      else text = 'Showing common font names. Detect the fonts installed on this device to get suggestions for any of them.'
+      const showButton = status === 'idle' || status === 'denied' || status === 'error'
+      return createElement('div', {
+        style: {
+          display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 14,
+          fontSize: px(12), lineHeight: 1.6, color: 'var(--dsw-alias-label-secondary)',
+        },
+      },
+        showButton && createElement('button', {
+          type: 'button', title: 'Ask the browser for the list of installed fonts',
+          onClick: () => { void scanInstalledFonts() },
+          style: {
+            padding: '6px 12px', borderRadius: 8, cursor: 'pointer',
+            border: '1px solid var(--dsw-alias-border-l1)',
+            background: 'var(--dsw-alias-bg-layer-2)',
+            color: 'var(--dsw-alias-label-primary)', fontSize: px(13),
+          },
+        }, 'Detect installed fonts'),
+        createElement('span', { 'aria-live': 'polite' }, text),
+      )
+    }
     /** Re-render whenever the applied state or the save status changes. */
     function useFontSettings() {
       const [, setTick] = useState(0)
@@ -671,6 +1011,7 @@ window.__ModuleLoader__.load({
 
     function FontPage() {
       const { en, zh, code, size } = useFontSettings()
+      useEffect(() => { autoScanIfGranted() }, [])
       const uiStack = [quoteList(en), quoteList(zh)].filter(Boolean).join(', ')
       const codeQ = quoteList(code)
       return createElement('div', { style: { maxWidth: 560, padding: '4px 2px' } },
@@ -682,6 +1023,7 @@ window.__ModuleLoader__.load({
         },
           'Customize the interface fonts. The UI font is set separately for Latin and CJK characters (Japanese, Chinese, and Korean); the code font is used for code blocks and inline code. Leave a font empty to use the default, and keep the size offset at 0 for no change. Changes apply everywhere immediately and are saved automatically.',
         ),
+        createElement(FontDetectBar, null),
         createElement(Field, {
           label: 'UI font · Latin', listId: 'dsh-custom-fonts-en-list', value: en,
           placeholder: 'e.g. Segoe UI, Arial', options: LATIN_FONTS,
