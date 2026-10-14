@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Rename UI font fields to **Latin** and **CJK**, keeping stored setting keys compatible.
+- Add Japanese and Korean font suggestions and multilingual CJK previews.
+- Standardize documentation and package metadata on English.
+
 ## [1.2.0] - 2026-10-14
 
 First release of the [lifwsp/dsh-custom-fonts](https://github.com/lifwsp/dsh-custom-fonts) fork.
@@ -44,7 +50,7 @@ First release of the [lifwsp/dsh-custom-fonts](https://github.com/lifwsp/dsh-cus
 
 ### Added
 
-- Settings page **Fonts (字体)** under Settings: customize the UI's English font and Chinese font independently.
+- Settings page **Fonts** under Settings: customize the UI's English font and Chinese font independently.
 - Live mixed Chinese/English preview that renders with the current font stack as you type.
 - Comma-separated font lists and free-form font names (with common-font suggestions via `<datalist>`).
 - Global stylesheet injection via a CSS `font-family` fallback chain: Latin characters run through the English font, Han characters fall back to the Chinese font — no language detection.

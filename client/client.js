@@ -2,10 +2,10 @@
  * dsh-custom-fonts — client bundle.
  *
  * Customizes the global UI fonts on a settings page:
- *   - "UI font · English" for Latin characters and "UI font · Chinese" for
- *     CJK glyphs, resolved through a CSS font-family fallback chain (English
- *     first, so Latin runs through the English font and Han characters fall
- *     back to the Chinese one — the standard way to split fonts by script
+ *   - "UI font · Latin" for Latin characters and "UI font · CJK" for
+ *     CJK glyphs, resolved through a CSS font-family fallback chain (Latin
+ *     first, so characters missing from the Latin font fall
+ *     back to the CJK one — the standard way to split fonts by script
  *     without any language detection);
  *   - "Code font": a separate mono face for `pre`/`code`/`kbd`/`samp`
  *     regions, applied with priority over the UI stack;
@@ -45,19 +45,20 @@ window.__ModuleLoader__.load({
     const state = { ...DEFAULTS }
     let styleTag = null
 
-    const EN_FONTS = [
+    const LATIN_FONTS = [
       'Segoe UI', 'Arial', 'Helvetica', 'Georgia', 'Times New Roman',
       'Courier New', 'Consolas', 'Verdana', 'Calibri',
     ]
-    const ZH_FONTS = [
-      '微软雅黑', 'Microsoft YaHei', '宋体', 'SimSun', '黑体', 'SimHei',
-      '楷体', 'KaiTi', '仿宋', 'FangSong', '思源黑体', 'Noto Sans CJK SC',
-      '苹方', 'PingFang SC',
+    const CJK_FONTS = [
+      'Noto Sans CJK JP', 'Yu Gothic', 'Meiryo', 'Hiragino Sans',
+      'Noto Sans CJK SC', 'Microsoft YaHei', 'SimSun', 'SimHei',
+      'KaiTi', 'FangSong', 'PingFang SC', 'Noto Sans CJK TC', 'PingFang TC',
+      'Noto Sans CJK KR', 'Malgun Gothic', 'Apple SD Gothic Neo',
     ]
     const CODE_FONTS = [
       'Consolas', 'Courier New', 'Menlo', 'Monaco', 'SF Mono',
       'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Source Code Pro',
-      'DejaVu Sans Mono', 'Sarasa Mono SC', '等距更纱黑体',
+      'DejaVu Sans Mono', 'Sarasa Mono J', 'Sarasa Mono SC', 'Sarasa Mono K',
     ]
 
     // Turn user input (comma-separated font lists allowed) into quoted CSS.
@@ -74,7 +75,7 @@ window.__ModuleLoader__.load({
     }
 
     // The global font CSS. Order matters:
-    //   1. UI stack (latin → chinese fallback)
+    //   1. UI stack (Latin → CJK fallback)
     //   2. code stack, later and equally specific, wins inside code regions
     //   3. size offset, relative to each element's own size
     function buildCss(o) {
@@ -331,18 +332,18 @@ window.__ModuleLoader__.load({
             color: 'var(--dsw-alias-label-secondary)',
           },
         },
-          'Customize the interface fonts. The UI font is set separately for English (Latin) and Chinese characters; the code font is used for code blocks and inline code. Leave a font empty to use the default, and keep the size offset at 0 for no change. Changes apply everywhere immediately and are saved automatically.',
+          'Customize the interface fonts. The UI font is set separately for Latin and CJK characters (Japanese, Chinese, and Korean); the code font is used for code blocks and inline code. Leave a font empty to use the default, and keep the size offset at 0 for no change. Changes apply everywhere immediately and are saved automatically.',
         ),
         createElement(Field, {
-          label: 'UI font · English', listId: 'dsh-custom-fonts-en-list', value: en,
-          placeholder: 'e.g. Segoe UI, Arial', options: EN_FONTS,
+          label: 'UI font · Latin', listId: 'dsh-custom-fonts-en-list', value: en,
+          placeholder: 'e.g. Segoe UI, Arial', options: LATIN_FONTS,
           hint: 'Font for Latin letters, digits, and punctuation. Separate several fonts with commas.',
           onChange: (e) => { update({ en: e.target.value }) },
         }),
         createElement(Field, {
-          label: 'UI font · Chinese', listId: 'dsh-custom-fonts-zh-list', value: zh,
-          placeholder: 'e.g. Microsoft YaHei, Noto Sans CJK SC', options: ZH_FONTS,
-          hint: 'Font for Chinese characters, used after the English font. Separate several fonts with commas.',
+          label: 'UI font · CJK', listId: 'dsh-custom-fonts-zh-list', value: zh,
+          placeholder: 'e.g. Noto Sans CJK JP, Noto Sans CJK SC', options: CJK_FONTS,
+          hint: 'Fallback font for Japanese, Chinese, and Korean text. Choose a font that supports your language. Separate several fonts with commas.',
           onChange: (e) => { update({ zh: e.target.value }) },
         }),
         createElement(Field, {
@@ -399,8 +400,12 @@ window.__ModuleLoader__.load({
         },
           'The quick brown fox jumps over the lazy dog 0123456789',
           createElement('br', null),
-          // Chinese sample text, kept as-is to preview the Chinese font.
-          '敏捷的棕色狐狸跳过了懒狗 0123456789',
+          // CJK samples intentionally use each script to preview font coverage.
+          '日本語：いろはにほへと 漢字 0123456789',
+          createElement('br', null),
+          '中文：敏捷的棕色狐狸跳过了懒狗 0123456789',
+          createElement('br', null),
+          '한국어: 다람쥐 헌 쳇바퀴에 타고파 0123456789',
         ),
         createElement('div', {
           style: {

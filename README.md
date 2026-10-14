@@ -1,20 +1,20 @@
 # dsh-custom-fonts
 
-Customize the **English** and **Chinese** UI fonts, the **code font**, and the **global font size** of the DeepSeek Harness (DSH) Web UI from a settings page, with a live preview. Your settings are **saved automatically** and restored after a page reload or a DSH restart.
+Customize the **Latin** and **CJK** UI fonts, the **code font**, and the **global font size** of the DeepSeek Harness (DSH) Web UI from a settings page, with a live preview. Your settings are **saved automatically** and restored after a page reload or a DSH restart.
 
 > This is a maintained fork of [lsh2002/dsh-custom-fonts](https://github.com/lsh2002/dsh-custom-fonts). It adds settings persistence (based on [PR #1](https://github.com/lsh2002/dsh-custom-fonts/pull/1)) and an English settings page. See [Credits](#credits).
 
-[中文说明 (upstream)](README.zh-CN.md)
+Documentation in this fork is maintained in English. CJK means Chinese, Japanese, and Korean.
 
 ## Features
 
 Once installed, the plugin adds a **Fonts** page under **Settings**:
 
-- **UI font · English**: used for Latin letters, digits, and punctuation (Segoe UI, Arial, Georgia, Consolas, and others).
-- **UI font · Chinese**: used for Han characters (Microsoft YaHei / 微软雅黑, SimSun / 宋体, SimHei / 黑体, KaiTi / 楷体, Noto Sans CJK SC / 思源黑体, PingFang SC / 苹方, and others).
+- **UI font · Latin**: used for Latin letters, digits, and punctuation (Segoe UI, Arial, Georgia, Consolas, and others).
+- **UI font · CJK**: a fallback font for Japanese, Chinese, and Korean text. Choose a font that supports your language, such as Noto Sans CJK JP, Yu Gothic, Meiryo, Noto Sans CJK SC, Microsoft YaHei, Noto Sans CJK TC, Noto Sans CJK KR, or Malgun Gothic.
 - **Code font**: a separate monospace font for code blocks and inline code (`pre`/`code`/`kbd`/`samp`), such as Consolas, JetBrains Mono, Fira Code, Cascadia Code, or Sarasa Mono SC.
 - **Font size offset**: a global slider from -4 to +8 px that adds the same amount to every text size (see [How it works](#how-it-works)). **Reset** next to the slider sets it back to 0.
-- **Live preview**: a mixed English/Chinese sample and a code sample update as you type. Each font field accepts any font name or a comma-separated list of fonts.
+- **Live preview**: Latin, Japanese, Chinese, and Korean samples and a code sample update as you type. Each font field accepts any font name or a comma-separated list of fonts.
 - **Restore defaults**: clears every setting, removes the injected styles, and deletes the saved values.
 - **Automatic saving**: changes apply immediately and are saved after a short pause in typing. A status line under the page reports whether the latest changes were saved.
 
@@ -61,7 +61,7 @@ The status line at the bottom of the page shows one of the following:
 
 The plugin uses DSH's built-in settings service instead of browser storage, so settings are tied to the DSH profile rather than to one browser.
 
-- The **host half** ([lib/index.js](lib/index.js)) declares a settings schema (`Config`) with four fields: `en`, `zh`, `code` (strings, default `""`), and `size` (number, default `0`). Each field is marked `.volatile()`, so DSH can edit it live without restarting the plugin.
+- The **host half** ([lib/index.js](lib/index.js)) declares a settings schema (`Config`) with four fields: `en`, `zh`, `code` (strings, default `""`), and `size` (number, default `0`). The stored keys `en` and `zh` retain their original names for compatibility; they now represent Latin and CJK fonts. Each field is marked `.volatile()`, so DSH can edit it live without restarting the plugin.
 - The **browser half** ([client/client.js](client/client.js)) gets the shared settings form with `ctx.configForms.get('dsh-custom-fonts')`, provided by `@deepseek-ai/dsh-client-ui-settings`. It applies the stored values when the page loads and whenever they change.
 - **Edits** are applied to the page immediately and written with one atomic `mutate` call after 400 ms without further changes, so typing a font name does not rewrite the file on every keystroke. A pending change is also written when the page is hidden or the plugin unloads. DSH queues writes in order and checks the revision, so concurrent edits cannot silently overwrite each other.
 - **Restore defaults** removes (`unset`s) the four stored fields instead of writing empty values. The plugin then falls back to its defaults, or to values set by a lower profile layer.
@@ -85,13 +85,13 @@ The plugin uses DSH's built-in settings service instead of browser storage, so s
 The plugin injects one global stylesheet:
 
 ```css
-:root { --dsh-custom-fonts-en: 'English font'; --dsh-custom-fonts-zh: 'Chinese font'; }
-body, body * { font-family: 'English font', 'Chinese font' !important; }
+:root { --dsh-custom-fonts-en: 'Latin font'; --dsh-custom-fonts-zh: 'CJK font'; }
+body, body * { font-family: 'Latin font', 'CJK font' !important; }
 pre, code, kbd, samp { font-family: 'Code font' !important; }
 body, body * { font-size: calc(1em + 2px) !important; }  /* only when the offset is not 0 */
 ```
 
-- The `font-family` fallback chain splits fonts by script. Latin characters use the English font first, and Han characters, which the English font has no glyphs for, fall back to the Chinese font. No language detection or DOM changes are needed.
+- The `font-family` fallback chain tries the Latin font first, then the CJK font for missing glyphs. It does not detect languages: a glyph already covered by the first font will not use the second. Choose a CJK font appropriate for your language, since shared Han characters can have different regional forms. No DOM changes are needed.
 - The code-font rule comes later, so it wins inside code regions only.
 - The size offset uses `calc(1em ± Npx)`, which is relative to each element's own size. Every nesting level shifts by exactly N px, so sizes do not grow exponentially. An offset of 0 removes the rule.
 - Characters that could break out of a CSS declaration (`; { } < > \`) are removed from font names before they are injected.

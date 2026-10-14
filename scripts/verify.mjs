@@ -362,17 +362,20 @@ await check('pagehide flushes a pending edit immediately', async () => {
 await check('settings page UI text is English (no untranslated Chinese)', async () => {
   const form = createFakeForm({ value: { en: '', zh: '', code: 'Consolas', size: 1 } })
   const c = mountClient(form)
-  const allowed = ['敏捷的棕色狐狸跳过了懒狗 0123456789'] // Chinese preview sample
+  const allowed = ['日本語：いろはにほへと 漢字 0123456789', '中文：敏捷的棕色狐狸跳过了懒狗 0123456789', '한국어: 다람쥐 헌 쳇바퀴에 타고파 0123456789'] // Intentional CJK preview samples
   const leaks = collectText(c.page()).filter((text) => /[\u3400-\u9fff\u3000-\u303f\uff00-\uffef]/.test(text) && !allowed.includes(text))
   assert(leaks.length === 0, `untranslated text: ${JSON.stringify(leaks)}`)
   assert(c.registrations[0].opts.label() === 'Fonts', 'section label not English')
+  const text = collectText(c.page()).join(' ')
+  assert(text.includes('UI font · Latin') && text.includes('UI font · CJK'), 'script-neutral labels missing')
+  for (const sample of allowed) assert(text.includes(sample), 'CJK preview missing')
   c.unload()
 })
 
 await check('client source has no Chinese outside font names and the preview sample', async () => {
   const source = readFileSync(join(root, 'client', 'client.js'), 'utf8')
-  const fontLists = /const (EN|ZH|CODE)_FONTS = \[[\s\S]*?\]/g
-  const stripped = source.replace(fontLists, '').replace('敏捷的棕色狐狸跳过了懒狗', '')
+  const fontLists = /const (LATIN|CJK|CODE)_FONTS = \[[\s\S]*?\]/g
+  const stripped = source.replace(fontLists, '').replace(/'日本語：[^']*'|'中文：[^']*'|'한국어:[^']*'/g, '')
   const match = stripped.match(/[\u3400-\u9fff]+/)
   assert(match === null, `Chinese text left in client source: ${match && match[0]}`)
 })
