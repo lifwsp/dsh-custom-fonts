@@ -96,8 +96,10 @@ window.__ModuleLoader__.load({
 
     // BEGIN pure font helpers (extracted and unit-tested by scripts/verify.mjs)
 
-    /** Names read from installed font files: English family -> localized names. */
+    /** Names learned from installed fonts: English family -> other names (localized first). */
     const localNames = new Map()
+    /** What installed fonts declare: family -> { scripts, mono, latin }. */
+    const fontInfo = new Map()
 
     function aliasesOf(name) {
       const out = []
@@ -125,49 +127,260 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Whether a family suits a field: `cjk` wants Japanese/Chinese/Korean
+     * coverage, `code` a fixed-pitch Latin design, `latin` Latin coverage.
+     * Families nothing is known about count as suitable, so the built-in
+     * lists and a browser without metadata keep their plain order.
+     */
+    function suits(name, kind) {
+      const info = fontInfo.get(name)
+      if (info === undefined || !kind) return true
+      if (kind === 'cjk') return info.scripts.length > 0
+      if (kind === 'code') return info.mono
+      return info.latin
+    }
+
+    /**
      * Suggestions for a query, as { name, alias } (`alias` is the localized
      * name to show next to the family, preferring the one that matched).
-     * Order: name prefix, alias prefix, name substring, alias substring.
+     * Families that suit `kind` come first; within each group the order is
+     * name prefix, alias prefix, name substring, alias substring.
      */
-    function filterFonts(pool, query, limit) {
+    function filterFonts(pool, query, limit, kind) {
       const q = foldText(query)
-      const out = []
-      if (q === '') {
-        for (const name of pool.slice(0, limit)) out.push({ name, alias: aliasesOf(name)[0] || '' })
-        return out
-      }
-      const buckets = [[], [], [], []]
+      const buckets = [[], [], [], [], [], [], [], []]
       for (const name of pool) {
+        const shift = suits(name, kind) ? 0 : 4
+        if (q === '') { buckets[shift].push({ name, alias: aliasesOf(name)[0] || '' }); continue }
         const at = foldText(name).indexOf(q)
-        if (at === 0) { buckets[0].push({ name, alias: aliasesOf(name)[0] || '' }); continue }
+        if (at === 0) { buckets[shift].push({ name, alias: aliasesOf(name)[0] || '' }); continue }
         let hit = ''
         let aliasAt = -1
         for (const alias of aliasesOf(name)) {
           const i = foldText(alias).indexOf(q)
           if (i >= 0 && (aliasAt < 0 || i < aliasAt)) { aliasAt = i; hit = alias }
         }
-        if (aliasAt === 0) buckets[1].push({ name, alias: hit })
-        else if (at > 0) buckets[2].push({ name, alias: aliasesOf(name)[0] || '' })
-        else if (aliasAt > 0) buckets[3].push({ name, alias: hit })
+        if (aliasAt === 0) buckets[shift + 1].push({ name, alias: hit })
+        else if (at > 0) buckets[shift + 2].push({ name, alias: aliasesOf(name)[0] || '' })
+        else if (aliasAt > 0) buckets[shift + 3].push({ name, alias: hit })
       }
       return buckets.flat().slice(0, limit)
     }
 
+    /** Short tags shown next to a suggestion: CJK coverage and fixed pitch. */
+    function fontBadges(name) {
+      const info = fontInfo.get(name)
+      if (info === undefined) return []
+      const labels = { ja: 'JP', 'zh-Hans': 'SC', 'zh-Hant': 'TC', ko: 'KR', han: 'CJK' }
+      const out = info.scripts.map((s) => labels[s] || s)
+      if (info.mono) out.push('Mono')
+      return out
+    }
+
     /**
-     * Read the family names stored in a font file (name IDs 1 and 16, every
-     * language) from its `name` table, touching only a few KB of the file.
-     * Handles single fonts and .ttc collections. Returns [{ names, locals }]:
-     * the English family names and the other-language names of each font.
+     * Remember what a catalog says about each family: localized and
+     * alternative names for search, and coverage for ranking and badges.
+     * Entries are { name, aka, locals, scripts, mono, latin }.
      */
-    async function readFontFileNames(blob) {
+    function learnFamilies(families) {
+      for (const f of families) {
+        if (!f || typeof f.name !== 'string') continue
+        const names = []
+        for (const n of [...(f.locals || []), ...(f.aka || [])]) if (typeof n === 'string' && !names.includes(n)) names.push(n)
+        localNames.set(f.name, names)
+        fontInfo.set(f.name, {
+          scripts: Array.isArray(f.scripts) ? f.scripts.filter((s) => typeof s === 'string') : [],
+          mono: f.mono === true,
+          latin: f.latin !== false,
+        })
+      }
+    }
+
+    // BEGIN font-tables (copied from lib/font-tables.js; verify.mjs checks they match)
+
+    /** Mac `name` record encodings this reader can decode (encodingID -> TextDecoder label). */
+    const MAC_NAME_ENCODINGS = { 0: 'macintosh', 1: 'shift_jis', 2: 'big5', 3: 'euc-kr', 25: 'gbk' }
+
+    /**
+     * CJK coverage from the OS/2 table. `ulCodePageRange1` bits: 17 Japanese,
+     * 18 Simplified Chinese, 19 Korean Wansung, 20 Traditional Chinese, 21 Korean
+     * Johab. `ulUnicodeRange2` (bits 32..63): 49 Hiragana, 50 Katakana,
+     * 56 Hangul syllables, 59 CJK unified ideographs.
+     */
+    function cjkScripts(range2, codePages1) {
       const out = []
-      const read = async (from, to) => new DataView(await blob.slice(from, to).arrayBuffer())
+      if ((codePages1 & (1 << 17)) || (range2 & (1 << 17)) || (range2 & (1 << 18))) out.push('ja')
+      if (codePages1 & (1 << 18)) out.push('zh-Hans')
+      if (codePages1 & (1 << 20)) out.push('zh-Hant')
+      if ((codePages1 & (1 << 19)) || (codePages1 & (1 << 21)) || (range2 & (1 << 24))) out.push('ko')
+      if (out.length === 0 && (range2 & (1 << 27))) out.push('han')
+      return out
+    }
+
+    function decodeNameString(view, off, len, platform, encoding) {
+      if (platform === 0 || platform === 3) {
+        let text = ''
+        for (let j = 0; j + 1 < len; j += 2) text += String.fromCharCode(view.getUint16(off + j))
+        return text
+      }
+      const label = MAC_NAME_ENCODINGS[encoding]
+      if (label === undefined || typeof TextDecoder !== 'function') return ''
+      try {
+        return new TextDecoder(label).decode(new Uint8Array(view.buffer, view.byteOffset + off, len))
+      } catch (error) {
+        return ''
+      }
+    }
+
+    /**
+     * Family names from a `name` table: nameID 16 (typographic family) wins over
+     * nameID 1 within each language, so weight-specific names such as
+     * "Hiragino Sans W3" collapse into their family. English names come from
+     * Windows records with a 0x?09 language and Mac records with language 0.
+     */
+    function readFamilyNames(nt) {
+      const count = nt.getUint16(2)
+      const strings = nt.getUint16(4)
+      const byLang = new Map()
+      for (let r = 0; r < count && 6 + 12 * r + 12 <= nt.byteLength; r++) {
+        const rec = 6 + 12 * r
+        const platform = nt.getUint16(rec), encoding = nt.getUint16(rec + 2)
+        const lang = nt.getUint16(rec + 4), id = nt.getUint16(rec + 6)
+        const len = nt.getUint16(rec + 8), off = strings + nt.getUint16(rec + 10)
+        if ((id !== 1 && id !== 16) || off + len > nt.byteLength) continue
+        if (platform !== 1 && platform !== 3) continue
+        const text = decodeNameString(nt, off, len, platform, encoding).replace(/\0/g, '').trim()
+        if (text === '') continue
+        const english = platform === 3 ? (lang & 0xff) === 0x09 : lang === 0
+        const key = english ? 'en' : platform + ':' + lang
+        const slot = byLang.get(key) || {}
+        if (slot[id] === undefined) slot[id] = text
+        byLang.set(key, slot)
+      }
+      const pick = (slot) => (slot[16] !== undefined ? slot[16] : slot[1])
+      const en = byLang.get('en')
+      if (en === undefined) return null
+      const family = pick(en)
+      const names = [family]
+      if (en[1] !== undefined && en[1] !== family) names.push(en[1])
+      const locals = []
+      for (const [key, slot] of byLang) {
+        if (key === 'en') continue
+        const local = pick(slot)
+        if (local !== family && !locals.includes(local)) locals.push(local)
+      }
+      return { family, names, locals }
+    }
+
+    /** Characters whose advances differ in any proportional Latin design. */
+    const PITCH_PROBE = [0x69, 0x6c, 0x6d, 0x57, 0x30, 0x2e, 0x49, 0x4d]
+
+    /** Glyph ids for `codes` from a cmap subtable of format 4 or 12 (0 when unmapped). */
+    async function cmapGlyphs(read, cmap, codes) {
+      const head = await read(cmap.at, cmap.at + 4)
+      if (head.byteLength < 4) return null
+      const numTables = Math.min(head.getUint16(2), 64)
+      const recs = await read(cmap.at + 4, cmap.at + 4 + 8 * numTables)
+      let best = -1
+      let bestRank = 99
+      for (let i = 0; i * 8 + 8 <= recs.byteLength; i++) {
+        const platform = recs.getUint16(i * 8), encoding = recs.getUint16(i * 8 + 2)
+        const rank = platform === 3 && encoding === 1 ? 0 : platform === 0 && encoding <= 3 ? 1 : platform === 3 && encoding === 10 ? 2 : platform === 0 ? 3 : 99
+        if (rank < bestRank) { bestRank = rank; best = recs.getUint32(i * 8 + 4) }
+      }
+      if (best < 0) return null
+      const at = cmap.at + best
+      const sub = await read(at, at + 16)
+      if (sub.byteLength < 8) return null
+      const format = sub.getUint16(0)
+      if (format === 4) {
+        const t = await read(at, at + sub.getUint16(2))
+        const segX2 = t.getUint16(6)
+        const ends = 14, starts = 16 + segX2, deltas = starts + segX2, ranges = deltas + segX2
+        if (ranges + segX2 > t.byteLength) return null
+        return codes.map((code) => {
+          for (let s = 0; s < segX2; s += 2) {
+            if (t.getUint16(ends + s) < code) continue
+            const start = t.getUint16(starts + s)
+            if (start > code) return 0
+            const ro = t.getUint16(ranges + s)
+            if (ro === 0) return (code + t.getUint16(deltas + s)) & 0xffff
+            const g = ranges + s + ro + 2 * (code - start)
+            if (g + 2 > t.byteLength) return 0
+            const gid = t.getUint16(g)
+            return gid === 0 ? 0 : (gid + t.getUint16(deltas + s)) & 0xffff
+          }
+          return 0
+        })
+      }
+      if (format === 12) {
+        if (sub.byteLength < 16) return null
+        const groups = Math.min(sub.getUint32(12), 65536)
+        const t = await read(at + 16, at + 16 + 12 * groups)
+        return codes.map((code) => {
+          for (let g = 0; g * 12 + 12 <= t.byteLength; g++) {
+            const start = t.getUint32(g * 12), end = t.getUint32(g * 12 + 4)
+            if (code >= start && code <= end) return t.getUint32(g * 12 + 8) + code - start
+            if (start > code) break
+          }
+          return 0
+        })
+      }
+      return null
+    }
+
+    /**
+     * Whether the Latin probe characters share one advance width. Measured from
+     * cmap + hmtx because the declared flags (post.isFixedPitch, PANOSE) are
+     * missing from many monospaced fonts, notably CJK programming fonts whose
+     * full-width glyphs make the font as a whole "not fixed pitch".
+     * Returns null when the tables are missing or too few probes are mapped.
+     */
+    async function latinFixedPitch(read, tables) {
+      const cmap = tables[0x636d6170], hhea = tables[0x68686561], hmtx = tables[0x686d7478]
+      if (cmap === undefined || hhea === undefined || hmtx === undefined) return null
+      try {
+        const h = await read(hhea.at, hhea.at + 36)
+        if (h.byteLength < 36) return null
+        const metrics = h.getUint16(34)
+        if (metrics === 0) return null
+        const gids = await cmapGlyphs(read, cmap, PITCH_PROBE)
+        if (gids === null) return null
+        const widths = new Set()
+        let mapped = 0
+        for (const gid of gids) {
+          if (gid === 0) continue
+          const index = Math.min(gid, metrics - 1)
+          const m = await read(hmtx.at + 4 * index, hmtx.at + 4 * index + 2)
+          if (m.byteLength < 2) continue
+          mapped++
+          widths.add(m.getUint16(0))
+        }
+        if (mapped < 4) return null
+        return widths.size === 1
+      } catch (error) {
+        return null
+      }
+    }
+
+    /**
+     * Describe every face in a font file (single font or .ttc/.otc collection).
+     * `read(from, to)` must resolve to a DataView of the bytes in [from, to),
+     * shorter at the end of the file. Returns
+     * [{ family, names, locals, scripts, mono, latin }] where `names` are the
+     * English family names (typographic first), `locals` the other-language
+     * family names, `scripts` CJK coverage tags (ja, zh-Hans, zh-Hant, ko, han),
+     * `mono` whether the face declares fixed pitch, and `latin` whether it
+     * covers Basic Latin. Unreadable data yields [].
+     */
+    async function readFontFaces(read) {
+      const out = []
       const head = await read(0, 12)
       if (head.byteLength < 12) return out
       const tag = head.getUint32(0)
       let offsets = [0]
       if (tag === 0x74746366) { // 'ttcf'
-        const count = Math.min(head.getUint32(8), 64)
+        const count = Math.min(head.getUint32(8), 256)
         const table = await read(12, 12 + 4 * count)
         offsets = []
         for (let i = 0; i * 4 + 4 <= table.byteLength; i++) offsets.push(table.getUint32(i * 4))
@@ -177,53 +390,117 @@ window.__ModuleLoader__.load({
       for (const base of offsets) {
         const header = await read(base, base + 12)
         if (header.byteLength < 12) continue
-        const numTables = header.getUint16(4)
+        const numTables = Math.min(header.getUint16(4), 512)
         const dir = await read(base + 12, base + 12 + 16 * numTables)
-        let at = -1
-        let length = 0
+        const tables = {}
         for (let i = 0; i * 16 + 16 <= dir.byteLength; i++) {
-          if (dir.getUint32(i * 16) === 0x6e616d65) { at = dir.getUint32(i * 16 + 8); length = dir.getUint32(i * 16 + 12); break }
+          const t = dir.getUint32(i * 16)
+          // name, OS/2, post, cmap, hhea, hmtx
+          if (t === 0x6e616d65 || t === 0x4f532f32 || t === 0x706f7374 || t === 0x636d6170 || t === 0x68686561 || t === 0x686d7478) {
+            tables[t] = { at: dir.getUint32(i * 16 + 8), length: dir.getUint32(i * 16 + 12) }
+          }
         }
-        if (at < 0) continue
-        const nt = await read(at, at + Math.min(length, 262144))
+        const name = tables[0x6e616d65]
+        if (name === undefined) continue
+        const nt = await read(name.at, name.at + Math.min(name.length, 262144))
         if (nt.byteLength < 6) continue
-        const count = nt.getUint16(2)
-        const strings = nt.getUint16(4)
-        const english = []
-        const locals = []
-        for (let r = 0; r < count && 6 + 12 * r + 12 <= nt.byteLength; r++) {
-          const rec = 6 + 12 * r
-          const platform = nt.getUint16(rec), lang = nt.getUint16(rec + 4), id = nt.getUint16(rec + 6)
-          const len = nt.getUint16(rec + 8), off = strings + nt.getUint16(rec + 10)
-          if (platform !== 3 || (id !== 1 && id !== 16) || off + len > nt.byteLength) continue
-          let text = ''
-          for (let j = 0; j + 1 < len; j += 2) text += String.fromCharCode(nt.getUint16(off + j))
-          text = text.trim()
-          if (text === '') continue
-          const list = (lang & 0xff) === 0x09 ? english : locals
-          if (!list.includes(text)) list.push(text)
+        const family = readFamilyNames(nt)
+        if (family === null) continue
+        let scripts = []
+        let latin = true
+        let mono = false
+        const os2 = tables[0x4f532f32]
+        if (os2 !== undefined) {
+          const o = await read(os2.at, os2.at + Math.min(os2.length, 96))
+          if (o.byteLength >= 58) {
+            const version = o.getUint16(0)
+            latin = (o.getUint32(42) & 1) !== 0
+            const codePages1 = version >= 1 && o.byteLength >= 82 ? o.getUint32(78) : 0
+            scripts = cjkScripts(o.getUint32(46), codePages1)
+            // PANOSE Latin Text family (2) with monospaced proportion (9).
+            if (o.getUint8(32) === 2 && o.getUint8(35) === 9) mono = true
+          }
         }
-        if (english.length > 0) out.push({ names: english, locals })
+        const measured = await latinFixedPitch(read, tables)
+        if (measured !== null) mono = measured
+        else if (!mono && tables[0x706f7374] !== undefined) {
+          const post = tables[0x706f7374]
+          const p = await read(post.at, post.at + 16)
+          if (p.byteLength >= 16 && p.getUint32(12) !== 0) mono = true
+        }
+        out.push({ family: family.family, names: family.names, locals: family.locals, scripts, mono, latin })
       }
       return out
     }
+
+    /**
+     * Merge per-face descriptions into one entry per family. Coverage is the
+     * union over faces; `mono` holds when any face is fixed pitch, since a family
+     * is either monospaced throughout or not at all in practice.
+     */
+    function mergeFamilies(faces) {
+      const byName = new Map()
+      for (const face of faces) {
+        if (!face || typeof face.family !== 'string' || face.family === '' || face.family.startsWith('.')) continue
+        let entry = byName.get(face.family)
+        if (entry === undefined) {
+          entry = { name: face.family, aka: [], locals: [], scripts: [], mono: false, latin: false }
+          byName.set(face.family, entry)
+        }
+        for (const n of face.names || []) if (n !== entry.name && !entry.aka.includes(n)) entry.aka.push(n)
+        for (const n of face.locals || []) if (!entry.locals.includes(n)) entry.locals.push(n)
+        for (const s of face.scripts || []) if (!entry.scripts.includes(s)) entry.scripts.push(s)
+        entry.mono = entry.mono || face.mono === true
+        entry.latin = entry.latin || face.latin !== false
+      }
+      return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }))
+    }
+
+    // END font-tables
 
     // END pure font helpers
 
     /**
      * `status`: idle (not asked yet) | loading | ready | denied | unsupported | error.
+     * `source`: where the ready list came from — `host` (read by the DSH Host
+     * on this computer) or `browser` (Local Font Access API).
      * `families` is the sorted list of installed family names once ready.
      */
-    const fontScan = { status: 'idle', families: [], lower: new Set(), message: '' }
+    const fontScan = { status: 'idle', source: null, families: [], lower: new Set(), message: '' }
     let scanPromise = null
     const MAX_SUGGESTIONS = 50
+    const FONT_LIST_METHOD = 'dsh-custom-fonts.list'
+    /**
+     * Connection RPC, kept only when the page runs on the Host's own machine
+     * (loopback): only then are the Host's fonts the ones this browser draws.
+     */
+    let hostRpc = null
 
     function localFontsSupported() {
       return typeof window !== 'undefined' && typeof window.queryLocalFonts === 'function'
     }
 
-    /** In the background, learn each installed family's localized names. */
-    async function learnLocalNames(faces) {
+    function setFamilies(names, source) {
+      fontScan.families = [...new Set(names)].sort((a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' }))
+      fontScan.lower = new Set(fontScan.families.map((name) => name.toLowerCase()))
+      fontScan.source = source
+      fontScan.status = 'ready'
+      fontScan.message = ''
+    }
+
+    /** Ask the Host for the fonts installed on this computer. */
+    async function scanHostFonts() {
+      const result = await hostRpc.call('/api', FONT_LIST_METHOD, {})
+      if (!result || result.ok !== true || !result.value || !Array.isArray(result.value.families)) {
+        throw new Error(result && result.error && result.error.message ? String(result.error.message) : 'the DSH host did not return a font list')
+      }
+      const families = result.value.families
+      learnFamilies(families)
+      setFamilies(families.map((f) => f && f.name).filter((name) => typeof name === 'string' && name !== ''), 'host')
+    }
+
+    /** In the background, learn names and coverage from each browser-reported family's file. */
+    async function learnFromBrowserFaces(faces) {
       const firstFace = new Map()
       for (const face of faces) if (face && face.family && !firstFace.has(face.family)) firstFace.set(face.family, face)
       const queue = [...firstFace.values()]
@@ -231,12 +508,13 @@ window.__ModuleLoader__.load({
       const worker = async () => {
         while (queue.length > 0) {
           const face = queue.shift()
-          if (localNames.has(face.family) || typeof face.blob !== 'function') continue
+          if (fontInfo.has(face.family) || typeof face.blob !== 'function') continue
           try {
-            const entries = await readFontFileNames(await face.blob())
-            for (const { names, locals } of entries) for (const name of names) if (!localNames.has(name)) localNames.set(name, locals)
+            const blob = await face.blob()
+            const described = mergeFamilies(await readFontFaces(async (from, to) => new DataView(await blob.slice(from, to).arrayBuffer())))
+            // The browser lists a family under its own name; file this entry under it too.
+            learnFamilies(described.flatMap((f) => [f, { ...f, name: face.family, aka: [f.name, ...f.aka] }]))
           } catch (error) { /* unreadable font: English name only */ }
-          if (!localNames.has(face.family)) localNames.set(face.family, [])
           if (++done % 25 === 0) notify()
         }
       }
@@ -244,25 +522,41 @@ window.__ModuleLoader__.load({
       notify()
     }
 
+    async function scanBrowserFonts() {
+      const faces = await window.queryLocalFonts()
+      const names = []
+      for (const face of faces || []) if (face && face.family) names.push(String(face.family))
+      setFamilies(names, 'browser')
+      void learnFromBrowserFaces(faces || [])
+    }
+
+    /**
+     * Load the installed-font list: from the Host when the page is local,
+     * otherwise (or when the Host fails) from the browser where supported.
+     */
     function scanInstalledFonts() {
       if (scanPromise !== null) return scanPromise
-      if (!localFontsSupported()) {
+      if (hostRpc === null && !localFontsSupported()) {
         fontScan.status = 'unsupported'
         notify()
         return Promise.resolve(false)
       }
       fontScan.status = 'loading'
       notify()
-      scanPromise = Promise.resolve()
-        .then(() => window.queryLocalFonts())
-        .then((faces) => {
-          const names = new Set()
-          for (const face of faces || []) if (face && face.family) names.add(String(face.family))
-          fontScan.families = [...names].sort((a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' }))
-          fontScan.lower = new Set(fontScan.families.map((name) => name.toLowerCase()))
-          fontScan.status = 'ready'
-          void learnLocalNames(faces || [])
-          return true
+      const viaHost = hostRpc !== null
+        ? scanHostFonts().then(() => true, (error) => {
+          fontScan.message = error && error.message ? String(error.message) : ''
+          return false
+        })
+        : Promise.resolve(false)
+      scanPromise = viaHost
+        .then((ok) => {
+          if (ok) return true
+          if (!localFontsSupported()) {
+            fontScan.status = hostRpc !== null ? 'error' : 'unsupported'
+            return false
+          }
+          return scanBrowserFonts().then(() => true)
         })
         .catch((error) => {
           const name = error && error.name
@@ -274,9 +568,11 @@ window.__ModuleLoader__.load({
       return scanPromise
     }
 
-    /** Scan without a prompt when the browser already granted access. */
-    function autoScanIfGranted() {
-      if (fontScan.status !== 'idle' || !localFontsSupported()) return
+    /** Load the list without a prompt: from the Host, or when the browser already granted access. */
+    function autoScan() {
+      if (fontScan.status !== 'idle') return
+      if (hostRpc !== null) { void scanInstalledFonts(); return }
+      if (!localFontsSupported()) return
       try {
         const nav = typeof navigator !== 'undefined' ? navigator : null
         if (!nav || !nav.permissions || typeof nav.permissions.query !== 'function') return
@@ -883,7 +1179,7 @@ window.__ModuleLoader__.load({
       // Installed fonts once detected; otherwise the built-in common names.
       const pool = fontScan.status === 'ready' ? fontScan.families : props.options
       const { head, query } = splitLastToken(props.value)
-      const matches = open ? filterFonts(pool, query, MAX_SUGGESTIONS) : []
+      const matches = open ? filterFonts(pool, query, MAX_SUGGESTIONS, props.kind) : []
       const missing = missingFonts(props.value)
 
       function choose(name) {
@@ -949,6 +1245,15 @@ window.__ModuleLoader__.load({
                 ref: (el) => { previewFace(el, item.name) },
                 style: { fontSize: px(12), color: 'var(--dsw-alias-label-secondary)' },
               }, item.alias),
+              ...fontBadges(item.name).map((badge, b) => createElement('span', {
+                key: 'badge-' + badge,
+                style: {
+                  marginLeft: b === 0 ? 'auto' : 0,
+                  padding: '0 5px', borderRadius: 4, fontSize: px(10), lineHeight: 1.6,
+                  border: '1px solid var(--dsw-alias-border-l1)',
+                  color: 'var(--dsw-alias-label-secondary)',
+                },
+              }, badge)),
             )),
           ),
         ),
@@ -962,9 +1267,12 @@ window.__ModuleLoader__.load({
     function FontDetectBar() {
       const status = fontScan.status
       let text
-      if (status === 'ready') text = fontScan.families.length + ' installed fonts detected. Type to search, or pick from the list.'
-      else if (status === 'loading') text = 'Detecting installed fonts…'
-      else if (status === 'unsupported') text = 'This browser cannot list installed fonts, so only common font names are suggested. Use a Chromium-based browser (Chrome or Edge) for full suggestions.'
+      if (status === 'ready') {
+        text = fontScan.families.length + ' installed fonts '
+          + (fontScan.source === 'host' ? 'found on this computer' : 'detected by the browser')
+          + '. Type to search, or pick from the list; fonts that fit each field are listed first.'
+      } else if (status === 'loading') text = 'Detecting installed fonts…'
+      else if (status === 'unsupported') text = 'This browser cannot list installed fonts, so only common font names are suggested. Open DSH on the computer it runs on, or use a Chromium-based browser (Chrome or Edge), for full suggestions.'
       else if (status === 'denied') text = 'Permission to read installed fonts was denied. Allow it in the site settings (Fonts / Local fonts) and try again.'
       else if (status === 'error') text = 'Could not read installed fonts' + (fontScan.message ? ' (' + fontScan.message + ')' : '') + '.'
       else text = 'Showing common font names. Detect the fonts installed on this device to get suggestions for any of them.'
@@ -976,7 +1284,7 @@ window.__ModuleLoader__.load({
         },
       },
         showButton && createElement('button', {
-          type: 'button', title: 'Ask the browser for the list of installed fonts',
+          type: 'button', title: 'Read the list of installed fonts',
           onClick: () => { void scanInstalledFonts() },
           style: {
             padding: '6px 12px', borderRadius: 8, cursor: 'pointer',
@@ -1011,7 +1319,7 @@ window.__ModuleLoader__.load({
 
     function FontPage() {
       const { en, zh, code, size } = useFontSettings()
-      useEffect(() => { autoScanIfGranted() }, [])
+      useEffect(() => { autoScan() }, [])
       const uiStack = [quoteList(en), quoteList(zh)].filter(Boolean).join(', ')
       const codeQ = quoteList(code)
       return createElement('div', { style: { maxWidth: 560, padding: '4px 2px' } },
@@ -1026,19 +1334,19 @@ window.__ModuleLoader__.load({
         createElement(FontDetectBar, null),
         createElement(Field, {
           label: 'UI font · Latin', listId: 'dsh-custom-fonts-en-list', value: en,
-          placeholder: 'e.g. Segoe UI, Arial', options: LATIN_FONTS,
+          placeholder: 'e.g. Segoe UI, Arial', options: LATIN_FONTS, kind: 'latin',
           hint: 'Font for Latin letters, digits, and punctuation. Separate several fonts with commas.',
           onChange: (e) => { update({ en: e.target.value }) },
         }),
         createElement(Field, {
           label: 'UI font · CJK', listId: 'dsh-custom-fonts-zh-list', value: zh,
-          placeholder: 'e.g. Noto Sans CJK JP, Noto Sans CJK SC', options: CJK_FONTS,
+          placeholder: 'e.g. Noto Sans CJK JP, Noto Sans CJK SC', options: CJK_FONTS, kind: 'cjk',
           hint: 'Fallback font for Japanese, Chinese, and Korean text. Choose a font that supports your language. Separate several fonts with commas.',
           onChange: (e) => { update({ zh: e.target.value }) },
         }),
         createElement(Field, {
           label: 'Code font', listId: 'dsh-custom-fonts-code-list', value: code,
-          placeholder: 'e.g. Consolas, JetBrains Mono', options: CODE_FONTS,
+          placeholder: 'e.g. Consolas, JetBrains Mono', options: CODE_FONTS, kind: 'code',
           hint: 'Monospace font for code blocks and inline code. Separate several fonts with commas.',
           onChange: (e) => { update({ code: e.target.value }) },
         }),
@@ -1174,6 +1482,26 @@ window.__ModuleLoader__.load({
           if (form === shared) form = null
         }
       }, 'dsh-custom-fonts: persisted settings')
+
+      // The Host lists its own fonts. Use it only from a loopback page: from
+      // another device the Host's fonts are not the ones this browser draws.
+      // `connection` is a nested inject, not a plugin dependency, so the
+      // page still works in compositions without it.
+      if (typeof ctx.inject === 'function') {
+        ctx.inject(['connection'], (inner) => {
+          const connection = inner.get('connection')
+          const rpc = connection && connection.isLoopback === true && connection.rpc && typeof connection.rpc.call === 'function'
+            ? connection.rpc : null
+          inner.effect(() => {
+            hostRpc = rpc
+            if (rpc !== null && fontScan.status === 'unsupported') fontScan.status = 'idle'
+            // The Fonts page may already be open.
+            if (rpc !== null && listeners.size > 0) autoScan()
+            notify()
+            return () => { if (hostRpc === rpc) hostRpc = null }
+          }, 'dsh-custom-fonts: host font list')
+        })
+      }
 
       slots.inject('settings.section', () => slots.register(
         { name: 'settings.section', id: 'fonts', order: 25, label: () => 'Fonts' },

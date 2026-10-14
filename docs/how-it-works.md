@@ -39,6 +39,23 @@ The plugin uses DSH's built-in settings service instead of browser storage, so s
   You can edit this entry by hand. Missing fields use the defaults. A `size` outside -4..+8 is clamped and rounded to the nearest 0.5. A value of the wrong type (for example `en: 42`) fails schema validation and stops the host half from loading; the page still works but cannot save until you fix the entry.
 - On a fresh install nothing is written until you change a setting, and no stylesheet is injected.
 
+## Installed-font suggestions
+
+The font fields suggest installed families as you type. The list comes from one of two places:
+
+- **The DSH Host** (preferred). When the page is opened on the computer DSH runs on (a loopback address, or the desktop app), the browser half calls `dsh-custom-fonts.list` on the Host's `/api` channel. The host half ([lib/fonts.js](../lib/fonts.js)) asks the platform for its font files (CoreText on macOS, `fc-list` on Linux, the font folders on Windows or as a fallback) and reads each file's `name`, `OS/2`, `post`, `cmap`, `hhea`, and `hmtx` tables. This works in every browser engine, including the WKWebView of the macOS desktop app, and needs no permission prompt. Results are cached per file (path, size, modification time) in `$DSH_HOME/cache/dsh-custom-fonts/fonts.json`, so later lists only read new or changed files.
+- **The browser** (fallback). From another device, the Host's fonts are not the ones that browser draws, so the plugin never asks the Host. Instead **Detect installed fonts** uses the Local Font Access API (Chrome and Edge only, with a permission prompt) and reads the same tables from each font file.
+
+Both paths share one table reader ([lib/font-tables.js](../lib/font-tables.js); the browser half carries a verbatim copy that the tests keep in sync). For each family it records:
+
+| Field | Source |
+| --- | --- |
+| English and localized names | `name` table, nameID 16 (typographic family) before 1, Windows and Mac records (Mac names in Shift_JIS, Big5, EUC-KR, GBK, Mac Roman are decoded). |
+| CJK coverage (`JP`, `SC`, `TC`, `KR`) | `OS/2` code-page bits (Japanese, Simplified/Traditional Chinese, Korean) and Unicode-range bits (kana, Hangul). |
+| Monospaced (`Mono`) | Advance widths of `i l m W 0 . I M` from `cmap` + `hmtx`; when those cannot be read, `post.isFixedPitch` or PANOSE. Measuring catches CJK programming fonts whose full-width glyphs make them "not fixed pitch" on paper. |
+
+Each field ranks families that fit it first: CJK coverage for the CJK font, monospaced for the code font. Other families still follow, so nothing is hidden. Within each group the order is name prefix, localized-name prefix, name substring, localized-name substring. Search ignores case, spaces, full/half-width, and hiragana/katakana differences.
+
 ## Injected CSS
 
 The plugin injects up to two stylesheets at the end of `<head>`. The font one:

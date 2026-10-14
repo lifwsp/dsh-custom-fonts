@@ -11,7 +11,7 @@ Change the **Latin** and **CJK** UI fonts, the **code font**, and the **text siz
 - **Separate fonts** for Latin text, CJK text (Chinese, Japanese, Korean), and code.
 - **Font size offset** from -4 to +8 px, applied evenly to all text.
 - **Live preview** with Latin, Japanese, Chinese, Korean, and code samples.
-- **Installed-font suggestions** in Chrome and Edge, each shown in its own typeface. Japanese font names such as 游ゴシック work too.
+- **Installed-font suggestions** in any browser on the computer DSH runs on (including the macOS desktop app), each shown in its own typeface. Fonts that fit the field come first (Japanese/Chinese/Korean fonts for CJK, monospaced fonts for code), with JP/SC/TC/KR/Mono tags. Japanese font names such as 游ゴシック work too.
 - **Saved automatically** in your DSH profile and restored after a reload or restart.
 
 ## Install
@@ -30,7 +30,7 @@ Then **restart DSH** once. The plugin needs to be loaded before it can save sett
 
 1. Open **Settings → Fonts**.
 2. Type a font name, pick a suggestion, or enter a comma-separated list such as `Inter, Segoe UI`. An empty field keeps the default font.
-3. Click **Detect installed fonts** (Chrome and Edge) to get suggestions from the fonts on your device.
+3. Installed fonts are listed automatically on the computer DSH runs on. From another device, click **Detect installed fonts** (Chrome and Edge) to use that device's fonts.
 4. Move the **Font size offset** slider. `0px` means no change.
 5. Use **Restore defaults** to undo everything.
 
@@ -41,7 +41,8 @@ Then **restart DSH** once. The plugin needs to be loaded before it can save sett
 | The **Fonts** page is missing | Restart DSH after installing, then refresh the page. |
 | Changes apply but are lost on reload | Check the status line at the bottom of the page. DSH saves settings only from a local (loopback) connection, and only after restarting once with the plugin installed. |
 | "Could not save font settings" | Edit any setting to try again. If it keeps failing, check the entry in `cordis.patch.yml` for a wrong value type. |
-| Font name has no effect | Check the spelling, or use **Detect installed fonts** to see which names are installed. |
+| Font name has no effect | Check the spelling, or pick it from the suggestions to see which names are installed. |
+| Suggestions show only a few common fonts | The installed-font list needs DSH restarted once after updating the plugin. From another device, use Chrome or Edge and click **Detect installed fonts**. |
 
 For the status messages and the stored format, see [How it works](docs/how-it-works.md).
 

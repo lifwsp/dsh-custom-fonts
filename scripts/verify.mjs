@@ -14,7 +14,9 @@
 //      a blanket `body *` rule, which compounded through DOM nesting), keep
 //      relative sizes untouched, and leave the page unchanged at 0;
 //   5. UI text — the rendered settings page contains no Chinese outside the
-//      font-name suggestions and the Chinese preview sample.
+//      font-name suggestions and the Chinese preview sample;
+//   6. fonts — the OpenType reader (names, coverage, fixed pitch), field-aware
+//      suggestion ranking, the host font catalog and its /api route.
 //
 // scripts/browser-check.mjs measures the same behaviour in a real browser.
 //
@@ -157,7 +159,7 @@ function createFakeForm({ value, status = 'ready', mode = 'host', accept = true,
 }
 
 /** Load a fresh copy of the client bundle and mount it against `form`. */
-function mountClient(form, sheets) {
+function mountClient(form, sheets, connection) {
   const dom = installDom(sheets)
   let handoff = null
   globalThis.window.__ModuleLoader__ = { load: (h) => { handoff = h } }
@@ -173,6 +175,11 @@ function mountClient(form, sheets) {
   const ctx = {
     effect: (fn) => { effects.push(fn()) },
     configForms: { get: (ns) => { assert(ns === 'dsh-custom-fonts', `wrong namespace ${ns}`); return form } },
+    inject: (deps, fn) => {
+      if (connection === undefined) return
+      assert(JSON.stringify(deps) === '["connection"]', `unexpected nested inject ${deps}`)
+      fn({ get: () => connection, effect: (f) => { effects.push(f()) } })
+    },
     slots: {
       inject: (key, cb) => { assert(key === 'settings.section', `wrong slot ${key}`); cb() },
       register: (opts, component) => { registrations.push({ opts, component }) },
@@ -515,7 +522,7 @@ function loadHelpers() {
   const source = readFileSync(join(root, 'client', 'client.js'), 'utf8')
   const aliases = source.match(/const FONT_ALIASES = \{[\s\S]*?\n    \}/)[0]
   const block = source.match(/\/\/ BEGIN pure font helpers[^\n]*\n([\s\S]*?)\/\/ END pure font helpers/)[1]
-  return new Function(`${aliases}\n${block}\nreturn { foldText, filterFonts, splitLastToken, readFontFileNames, localNames, aliasesOf }`)()
+  return new Function(`${aliases}\n${block}\nreturn { foldText, filterFonts, splitLastToken, readFontFaces, mergeFamilies, learnFamilies, fontBadges, localNames, fontInfo, aliasesOf }`)()
 }
 
 await check('font search: Japanese names, width forms, kana, separators', async () => {
@@ -540,35 +547,190 @@ await check('font search: comma-separated lists complete the last entry only', a
   assert(JSON.stringify(h.splitLastToken('Yu')) === JSON.stringify({ head: '', query: 'Yu' }), 'single')
 })
 
-await check('font file reader: finds Japanese family names in TrueType and TTC data', async () => {
-  const h = loadHelpers()
-  const utf16 = (text) => { const b = Buffer.alloc(text.length * 2); for (let i = 0; i < text.length; i++) b.writeUInt16BE(text.charCodeAt(i), i * 2); return b }
-  const makeFont = (family, local, fontOffset = 0) => {
-    const strings = [utf16(family), utf16(local)]
-    const records = [[3, 1, 0x409, 1, 0], [3, 1, 0x411, 1, strings[0].length]]
-    const nameLen = 6 + 12 * 2 + strings[0].length + strings[1].length
-    const name = Buffer.alloc(nameLen)
-    name.writeUInt16BE(0, 0); name.writeUInt16BE(2, 2); name.writeUInt16BE(6 + 24, 4)
-    records.forEach((r, i) => {
-      ;[r[0], r[1], r[2], r[3], i === 0 ? strings[0].length : strings[1].length, r[4]].forEach((v, k) => name.writeUInt16BE(v, 6 + 12 * i + 2 * k))
-    })
-    strings[0].copy(name, 30); strings[1].copy(name, 30 + strings[0].length)
-    const dir = Buffer.alloc(12 + 16)
-    dir.writeUInt32BE(0x00010000, 0); dir.writeUInt16BE(1, 4)
-    dir.write('name', 12, 'latin1'); dir.writeUInt32BE(fontOffset + 28, 20); dir.writeUInt32BE(nameLen, 24)
-    return Buffer.concat([dir, name])
+// --- OpenType reader ------------------------------------------------------
+const utf16 = (text) => { const b = Buffer.alloc(text.length * 2); for (let i = 0; i < text.length; i++) b.writeUInt16BE(text.charCodeAt(i), i * 2); return b }
+
+/**
+ * Build a minimal sfnt with `name` records [platform, encoding, language, nameID, Buffer],
+ * plus optional OS/2 (ulUnicodeRange2, ulCodePageRange1, PANOSE) and post (isFixedPitch).
+ * `base` is the absolute offset the font will sit at (for .ttc members).
+ */
+function makeFont({ names, os2, post }, base = 0) {
+  const strings = Buffer.concat(names.map((n) => n[4]))
+  const name = Buffer.alloc(6 + 12 * names.length)
+  name.writeUInt16BE(0, 0); name.writeUInt16BE(names.length, 2); name.writeUInt16BE(6 + 12 * names.length, 4)
+  let off = 0
+  names.forEach((n, i) => {
+    ;[n[0], n[1], n[2], n[3], n[4].length, off].forEach((v, k) => name.writeUInt16BE(v, 6 + 12 * i + 2 * k))
+    off += n[4].length
+  })
+  const tables = [['name', Buffer.concat([name, strings])]]
+  if (os2) {
+    const t = Buffer.alloc(86)
+    t.writeUInt16BE(1, 0)
+    if (os2.panose) os2.panose.forEach((v, i) => t.writeUInt8(v, 32 + i))
+    t.writeUInt32BE(1, 42) // Basic Latin
+    t.writeUInt32BE((os2.range2 || 0) >>> 0, 46)
+    t.writeUInt32BE((os2.codePages1 || 0) >>> 0, 78)
+    tables.push(['OS/2', t])
   }
-  const single = new Blob([makeFont('Yu Gothic', '游ゴシック')])
-  const one = await h.readFontFileNames(single)
-  assert(one.length === 1 && one[0].names[0] === 'Yu Gothic' && one[0].locals[0] === '游ゴシック', `single: ${JSON.stringify(one)}`)
-  const f1 = makeFont('Meiryo', 'メイリオ', 20), f2 = makeFont('Meiryo UI', 'メイリオ UI', 20 + makeFont('Meiryo', 'メイリオ').length)
-  const ttcHead = Buffer.alloc(20)
-  ttcHead.write('ttcf', 0, 'latin1'); ttcHead.writeUInt32BE(0x10000, 4); ttcHead.writeUInt32BE(2, 8)
-  ttcHead.writeUInt32BE(20, 12); ttcHead.writeUInt32BE(20 + f1.length, 16)
-  const ttc = await h.readFontFileNames(new Blob([Buffer.concat([ttcHead, f1, f2])]))
-  assert(ttc.length === 2 && ttc[1].names[0] === 'Meiryo UI' && ttc[1].locals[0] === 'メイリオ UI', `ttc: ${JSON.stringify(ttc)}`)
-  assert((await h.readFontFileNames(new Blob([Buffer.from('not a font file!')]))).length === 0, 'garbage ignored')
+  if (post !== undefined) { const t = Buffer.alloc(32); t.writeUInt32BE(post ? 1 : 0, 12); tables.push(['post', t]) }
+  const dir = Buffer.alloc(12 + 16 * tables.length)
+  dir.writeUInt32BE(0x00010000, 0); dir.writeUInt16BE(tables.length, 4)
+  let at = base + dir.length
+  tables.forEach(([tag, data], i) => {
+    dir.write(tag, 12 + 16 * i, 'latin1'); dir.writeUInt32BE(at, 12 + 16 * i + 8); dir.writeUInt32BE(data.length, 12 + 16 * i + 12)
+    at += data.length
+  })
+  return Buffer.concat([dir, ...tables.map((t) => t[1])])
+}
+const blobReader = (buffer) => { const blob = new Blob([buffer]); return async (from, to) => new DataView(await blob.slice(from, to).arrayBuffer()) }
+
+await check('font reader: names in every language, typographic family first, TTC', async () => {
+  const h = loadHelpers()
+  const font = makeFont({ names: [
+    [3, 1, 0x409, 1, utf16('Hiragino Sans W3')], [3, 1, 0x409, 16, utf16('Hiragino Sans')],
+    [3, 1, 0x411, 1, utf16('ヒラギノ角ゴシック W3')], [3, 1, 0x411, 16, utf16('ヒラギノ角ゴシック')],
+  ] })
+  const one = await h.readFontFaces(blobReader(font))
+  assert(one.length === 1 && one[0].family === 'Hiragino Sans', `typographic family: ${JSON.stringify(one)}`)
+  assert(one[0].names.includes('Hiragino Sans W3') && one[0].locals.join() === 'ヒラギノ角ゴシック', `names: ${JSON.stringify(one[0])}`)
+
+  // Mac platform records (Shift_JIS) are read too.
+  const sjis = Buffer.from([0x83, 0x81, 0x83, 0x43, 0x83, 0x8a, 0x83, 0x49]) // メイリオ
+  const mac = makeFont({ names: [[1, 0, 0, 1, Buffer.from('Meiryo', 'latin1')], [1, 1, 11, 1, sjis]] })
+  const m = await h.readFontFaces(blobReader(mac))
+  assert(m.length === 1 && m[0].family === 'Meiryo' && m[0].locals[0] === 'メイリオ', `mac records: ${JSON.stringify(m)}`)
+
+  const a = { names: [[3, 1, 0x409, 1, utf16('Meiryo')], [3, 1, 0x411, 1, utf16('メイリオ')]] }
+  const b = { names: [[3, 1, 0x409, 1, utf16('Meiryo UI')], [3, 1, 0x411, 1, utf16('メイリオ UI')]] }
+  const f1 = makeFont(a, 20)
+  const f2 = makeFont(b, 20 + f1.length)
+  const head = Buffer.alloc(20)
+  head.write('ttcf', 0, 'latin1'); head.writeUInt32BE(0x10000, 4); head.writeUInt32BE(2, 8)
+  head.writeUInt32BE(20, 12); head.writeUInt32BE(20 + f1.length, 16)
+  const ttc = await h.readFontFaces(blobReader(Buffer.concat([head, f1, f2])))
+  assert(ttc.length === 2 && ttc[1].family === 'Meiryo UI' && ttc[1].locals[0] === 'メイリオ UI', `ttc: ${JSON.stringify(ttc)}`)
+  assert((await h.readFontFaces(blobReader(Buffer.from('not a font file!')))).length === 0, 'garbage ignored')
 })
+
+await check('font reader: CJK coverage from OS/2, fixed pitch from post/PANOSE', async () => {
+  const h = loadHelpers()
+  const en = (n) => [[3, 1, 0x409, 1, utf16(n)]]
+  const jp = await h.readFontFaces(blobReader(makeFont({ names: en('JP Font'), os2: { codePages1: 1 << 17 } })))
+  assert(jp[0].scripts.join() === 'ja' && jp[0].mono === false, `ja: ${JSON.stringify(jp[0])}`)
+  const sc = await h.readFontFaces(blobReader(makeFont({ names: en('SC Font'), os2: { codePages1: 1 << 18, range2: 1 << 27 } })))
+  assert(sc[0].scripts.join() === 'zh-Hans', `zh-Hans: ${JSON.stringify(sc[0])}`)
+  const ko = await h.readFontFaces(blobReader(makeFont({ names: en('KR Font'), os2: { range2: 1 << 24 } })))
+  assert(ko[0].scripts.join() === 'ko', `ko: ${JSON.stringify(ko[0])}`)
+  const latin = await h.readFontFaces(blobReader(makeFont({ names: en('Latin Font'), os2: {} })))
+  assert(latin[0].scripts.length === 0 && latin[0].latin === true, `latin: ${JSON.stringify(latin[0])}`)
+  const monoPost = await h.readFontFaces(blobReader(makeFont({ names: en('Mono A'), os2: {}, post: true })))
+  const monoPanose = await h.readFontFaces(blobReader(makeFont({ names: en('Mono B'), os2: { panose: [2, 0, 0, 9] } })))
+  assert(monoPost[0].mono && monoPanose[0].mono, 'post.isFixedPitch and PANOSE monospaced both count')
+})
+
+await check('client carries an exact copy of lib/font-tables.js', async () => {
+  const lib = readFileSync(join(root, 'lib', 'font-tables.js'), 'utf8')
+  const client = readFileSync(join(root, 'client', 'client.js'), 'utf8')
+  const body = (text) => text.match(/\/\/ BEGIN font-tables[^\n]*\n([\s\S]*?)\/\/ END font-tables/)[1]
+    .split('\n').map((line) => line.trim()).filter(Boolean).join('\n')
+  assert(body(lib) === body(client), 'client/client.js font-tables block differs from lib/font-tables.js; copy it over')
+})
+
+await check('suggestions: fonts that fit the field come first, with badges', async () => {
+  const h = loadHelpers()
+  h.learnFamilies([
+    { name: 'Arial', aka: [], locals: [], scripts: [], mono: false, latin: true },
+    { name: 'Hiragino Sans', aka: [], locals: ['ヒラギノ角ゴシック'], scripts: ['ja'], mono: false, latin: true },
+    { name: 'Menlo', aka: [], locals: [], scripts: [], mono: true, latin: true },
+    { name: 'PlemolJP35', aka: [], locals: [], scripts: ['ja'], mono: true, latin: true },
+  ])
+  const pool = ['Arial', 'Hiragino Sans', 'Menlo', 'PlemolJP35']
+  const names = (q, kind) => h.filterFonts(pool, q, 50, kind).map((m) => m.name).join()
+  assert(names('', 'cjk') === 'Hiragino Sans,PlemolJP35,Arial,Menlo', `cjk: ${names('', 'cjk')}`)
+  assert(names('', 'code') === 'Menlo,PlemolJP35,Arial,Hiragino Sans', `code: ${names('', 'code')}`)
+  assert(names('', 'latin') === pool.join(), 'latin keeps the plain order')
+  assert(names('ひらぎの', 'cjk') === 'Hiragino Sans', 'localized names learned from the catalog are searchable')
+  h.learnFamilies([{ name: 'Lucida Grande', aka: [], locals: [], scripts: [], mono: false, latin: true }])
+  const lucida = h.filterFonts([...pool, 'Lucida Grande'], 'l', 50, 'code').map((m) => m.name).join()
+  assert(lucida === 'Menlo,PlemolJP35,Lucida Grande,Arial', `suitable substring matches beat an unsuitable prefix match: ${lucida}`)
+  assert(h.fontBadges('PlemolJP35').join() === 'JP,Mono' && h.fontBadges('Arial').length === 0, 'badges')
+  assert(h.fontBadges('Unknown').length === 0, 'unknown families have no badges')
+})
+
+await check('client: a loopback page lists the Host fonts; a remote page does not ask', async () => {
+  const families = [
+    { name: 'Hiragino Sans', aka: [], locals: ['ヒラギノ角ゴシック'], scripts: ['ja'], mono: false, latin: true },
+    { name: 'Menlo', aka: [], locals: [], scripts: [], mono: true, latin: true },
+  ]
+  const calls = []
+  const rpc = { call: async (channel, method, payload) => { calls.push([channel, method]); return { ok: true, value: { families, files: 2, ms: 1 } } } }
+  const local = mountClient(createFakeForm({ value: { en: '', zh: '', code: '', size: 0 } }), undefined, { isLoopback: true, rpc })
+  const text = () => collectText(local.page()).join(' ')
+  assert(text().includes('Detect installed fonts'), 'button shown before the first scan')
+  local.button('Detect installed fonts').props.onClick()
+  await sleep(0)
+  await sleep(0)
+  assert(calls.length === 1 && calls[0][0] === '/api' && calls[0][1] === 'dsh-custom-fonts.list', `host asked once: ${JSON.stringify(calls)}`)
+  assert(text().includes('2 installed fonts found on this computer'), `status: ${text()}`)
+  local.unload()
+
+  const remoteCalls = []
+  const remote = mountClient(createFakeForm({ value: { en: '', zh: '', code: '', size: 0 } }), undefined,
+    { isLoopback: false, rpc: { call: async () => { remoteCalls.push(1); return { ok: false } } } })
+  remote.button('Detect installed fonts').props.onClick()
+  await sleep(0)
+  assert(remoteCalls.length === 0, 'a non-loopback page never asks the Host for its fonts')
+  assert(collectText(remote.page()).join(' ').includes('cannot list installed fonts'), 'falls back to the browser path')
+  remote.unload()
+})
+
+// --- host font catalog ------------------------------------------------------
+await check('host catalog: lists, merges, caches per file, and reuses fresh results', async () => {
+  const { createFontCatalog } = await import(pathToFileURL(join(root, 'lib', 'fonts.js')).href)
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-custom-fonts-'))
+  try {
+    const regular = join(dir, 'a.ttf'), bold = join(dir, 'b.otf'), junk = join(dir, 'c.ttf')
+    writeFileSync(regular, makeFont({ names: [[3, 1, 0x409, 16, utf16('Test Sans')], [3, 1, 0x411, 16, utf16('テスト')]], os2: { codePages1: 1 << 17 } }))
+    writeFileSync(bold, makeFont({ names: [[3, 1, 0x409, 1, utf16('Test Sans Bold')], [3, 1, 0x409, 16, utf16('Test Sans')]], os2: {} }))
+    writeFileSync(junk, 'not a font')
+    let described = 0
+    const catalog = createFontCatalog({
+      persist: false,
+      listFiles: async () => [regular, bold, junk, join(dir, 'missing.ttf')],
+      describe: async (path) => { described++; const { readFontFaces } = await import(pathToFileURL(join(root, 'lib', 'font-tables.js')).href); const buf = readFileSync(path); return readFontFaces(async (f, t) => new DataView(buf.buffer, buf.byteOffset + Math.min(f, buf.length), Math.max(0, Math.min(t, buf.length) - Math.min(f, buf.length)))) },
+    })
+    const [first, again] = await Promise.all([catalog.list(), catalog.list()])
+    assert(first === again, 'concurrent calls share one scan')
+    assert(first.families.length === 1, `one merged family: ${JSON.stringify(first.families)}`)
+    const f = first.families[0]
+    assert(f.name === 'Test Sans' && f.locals.join() === 'テスト' && f.scripts.join() === 'ja' && f.aka.includes('Test Sans Bold'), `merged: ${JSON.stringify(f)}`)
+    assert(described === 3, `each existing file read once, got ${described}`)
+    assert((await catalog.list()) === first, 'fresh result reused')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await check('host route: answers dsh-custom-fonts.list through connection.fetch', async () => {
+  const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+  const routes = []
+  const ctx = {
+    inject: (deps, fn) => {
+      assert(JSON.stringify(deps) === '["connection"]', 'route waits for connection only')
+      fn({ get: () => ({ fetch: { register: (route) => { routes.push(route); return async () => {} } } }), effect: (f) => f() })
+    },
+  }
+  mod.apply(ctx)
+  assert(routes.length === 1 && routes[0].path === '/api/dsh-custom-fonts.list' && routes[0].methods.join() === 'POST', 'route registered')
+  const bad = await routes[0].fetch(new Request('http://x/api/dsh-custom-fonts.list', { method: 'POST', body: JSON.stringify({ type: 'client-request', rpcId: 'r1', method: 'other' }) }))
+  const badBody = await bad.json()
+  assert(badBody.rpcId === 'r1' && badBody.result.ok === false, 'mismatched method rejected')
+})
+
 // --- manifest self-consistency -------------------------------------------
 await check('package.json dsh fields are consistent', async () => {
   const manifest = require(join(root, 'package.json'))
