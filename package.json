@@ -1,7 +1,7 @@
 {
   "name": "dsh-custom-fonts",
-  "version": "1.1.0",
-  "description": "Customize the DeepSeek Harness UI's Chinese and English fonts, code font, and global font-size offset on a settings page with a live preview — 在设置页自定义界面中英文/代码字体与全局字号偏移，实时预览、全局生效。",
+  "version": "1.2.0",
+  "description": "Customize the DeepSeek Harness UI's English and Chinese fonts, code font, and global font-size offset on a settings page with a live preview. Settings are saved and restored across restarts.",
   "license": "MIT",
   "type": "module",
   "keywords": [
@@ -25,16 +25,29 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lsh2002/dsh-custom-fonts.git"
+    "url": "git+https://github.com/lifwsp/dsh-custom-fonts.git"
   },
-  "homepage": "https://github.com/lsh2002/dsh-custom-fonts",
+  "homepage": "https://github.com/lifwsp/dsh-custom-fonts#readme",
+  "bugs": {
+    "url": "https://github.com/lifwsp/dsh-custom-fonts/issues"
+  },
+  "contributors": [
+    "AgustD (https://github.com/lsh2002) - original author",
+    "tom613951 (https://github.com/tom613951) - settings persistence (PR #1)"
+  ],
   "main": "./lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./client/client.js",
     "./package.json": "./package.json"
   },
-  "dependencies": {
+  "scripts": {
+    "test": "node scripts/verify.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "devDependencies": {
     "@deepseek-ai/schemastery": "~3.18.4"
   },
   "dsh": {
