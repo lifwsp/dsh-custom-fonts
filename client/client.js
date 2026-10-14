@@ -9,9 +9,9 @@
  *     without any language detection);
  *   - "Code font": a separate mono face for `pre`/`code`/`kbd`/`samp`
  *     regions, applied with priority over the UI stack;
- *   - "Font size offset": a global px offset (range -4..+8) applied as
- *     `calc(1em + Npx)` relative to each element's own size — every level
- *     shifts by exactly N, so there is no cascade blow-up.
+ *   - "Font size offset": a global px offset (range -4..+8, step 0.5). It is
+ *     added only where a size is *declared* (see "Size offset" below), never
+ *     to every element, so it cannot accumulate through DOM nesting.
  *
  * Persistence: the four values live in the Host settings document under the
  * `dsh-custom-fonts` namespace (schema declared by the host half in
@@ -37,6 +37,10 @@ window.__ModuleLoader__.load({
     const FIELDS = Object.keys(DEFAULTS)
     const SIZE_MIN = -4
     const SIZE_MAX = 8
+    const SIZE_STEP = 0.5
+    /** CSS variable carrying the current offset (e.g. `2.5px`). */
+    const OFFSET_VAR = '--dsh-custom-fonts-size-offset'
+    const OFFSET_REF = 'var(' + OFFSET_VAR + ', 0px)'
     /** Quiet period before an edit is written to the Host settings document. */
     const SAVE_DELAY_MS = 400
 
@@ -74,19 +78,273 @@ window.__ModuleLoader__.load({
         }).join(', ')
     }
 
-    // The global font CSS. Order matters:
+    // ---------------------------------------------------------------------
+    // Size offset
+    //
+    // The offset must be added exactly once per text run. A blanket
+    // `body * { font-size: calc(1em + N) }` adds it on every nesting level
+    // (1em is the parent's already-enlarged size), so a 10-deep tree drifts
+    // by 10·N. Instead, the page's own stylesheets are mirrored: every rule
+    // that *declares* an absolute size gets a twin with the same selector
+    // (and the same @media/@supports/... wrapper) whose size is
+    // `calc(<original> + offset)`. Equal specificity and a later position
+    // make each twin win exactly where its original applied, so the cascade
+    // is untouched. Inherited sizes and relative sizes (em, %, rem, keywords)
+    // are left alone and simply follow their already-offset parent, so the
+    // shift never compounds. Elements with no declared size inherit from
+    // `html`, which gets `calc(100% + offset)`.
+    //
+    // Declared sizes the original rule repeats verbatim (em, %, keywords)
+    // keep their place in the tie-breaking order. The twins reference a CSS
+    // variable, so dragging the slider only rewrites that variable; the twins
+    // themselves are rebuilt only when the page's stylesheets change.
+    // ---------------------------------------------------------------------
+
+    const ABS_UNIT = '(?:px|pt|pc|cm|mm|q|in|vw|vh|vmin|vmax|[sld]v[wh])'
+    const ABS_LENGTH = new RegExp('^(?:\\d+\\.?\\d*|\\.\\d+)' + ABS_UNIT + '$', 'i')
+    const HAS_ABS = new RegExp('\\d' + ABS_UNIT + '\\b', 'i')
+    /** Units resolved against the parent (or root) font size: never offset twice. */
+    const HAS_REL = /[\d.](?:r?em|ex|ch|r?lh|cap|ic)\b|%/i
+    const ZERO = /^[-+]?0*\.?0+[a-z]*$/i
+    const SINGLE_VAR = /^var\(\s*(--[\w-]+)\s*(?:,[\s\S]*)?\)$/
+    const FONT_PREFIX = /^(?:normal|italic|oblique|small-caps|bold|bolder|lighter|\d{1,4}(?:\.\d+)?|(?:ultra-|extra-|semi-)?(?:condensed|expanded))$/i
+    const GROUP_PRELUDE = /^@(?:media|supports|container|layer|scope|document|-moz-document)\b/i
+
+    /**
+     * Whether a declared font-size / line-height expression may be offset:
+     * absolute lengths and calc()/min()/max()/clamp() over absolute lengths.
+     * `var(--x)` is followed through the page's custom properties; an
+     * unknown variable is trusted only for font-size (`allowVar`), since a
+     * line-height variable may hold a unitless number. Zero sizes (a
+     * whitespace-collapsing trick) and anything relative to the parent are
+     * left alone: their parent already carries the offset.
+     */
+    function offsetable(value, allowVar, tokens, depth = 0) {
+      const v = String(value || '').trim()
+      if (v === '' || ZERO.test(v) || HAS_REL.test(v)) return false
+      if (ABS_LENGTH.test(v)) return true
+      const single = SINGLE_VAR.exec(v)
+      if (single !== null && tokens && tokens.has(single[1]) && depth < 5) {
+        return offsetable(tokens.get(single[1]), allowVar, tokens, depth + 1)
+      }
+      if (relativeVar(v, tokens, 0)) return false
+      if (/^(?:calc|min|max|clamp)\(/i.test(v)) return HAS_ABS.test(v)
+      return allowVar && single !== null
+    }
+
+    /** Whether a value references a custom property that is (transitively) relative. */
+    function relativeVar(value, tokens, depth) {
+      if (!tokens || depth > 4) return false
+      for (const m of String(value).matchAll(/var\(\s*(--[\w-]+)/g)) {
+        const token = tokens.get(m[1])
+        if (token === undefined) continue
+        if (HAS_REL.test(token) || relativeVar(token, tokens, depth + 1)) return true
+      }
+      return false
+    }
+
+    /** Split a `font` shorthand at top level into words, '/' and ','. */
+    function splitFont(value) {
+      const out = []
+      let depth = 0
+      let cur = ''
+      for (const ch of value) {
+        if (ch === '(') depth += 1
+        else if (ch === ')') depth -= 1
+        if (depth === 0 && (/\s/.test(ch) || ch === '/' || ch === ',')) {
+          if (cur) out.push(cur)
+          cur = ''
+          if (ch === '/' || ch === ',') out.push(ch)
+          continue
+        }
+        cur += ch
+      }
+      if (cur) out.push(cur)
+      return out
+    }
+
+    /**
+     * The font-size / line-height expressions inside a `font` shorthand,
+     * or null when they cannot be determined. `font: var(--token)` uses
+     * the token's `--token-font-size` / `--token-line-height` companions
+     * (DSH design tokens provide them) or else the token's own value.
+     */
+    function resolveFont(value, tokens, depth) {
+      const v = String(value || '').trim()
+      const single = SINGLE_VAR.exec(v)
+      if (single !== null) {
+        const name = single[1]
+        if (tokens.has(name + '-font-size')) {
+          return {
+            size: 'var(' + name + '-font-size)',
+            lh: tokens.has(name + '-line-height') ? 'var(' + name + '-line-height)' : null,
+          }
+        }
+        return tokens.has(name) && depth < 3 ? resolveFont(tokens.get(name), tokens, depth + 1) : null
+      }
+      const words = splitFont(v)
+      let i = 0
+      while (i < words.length && FONT_PREFIX.test(words[i])) i += 1
+      // A size must be followed by a family; a lone word is a system font.
+      if (i >= words.length - 1 || words[i] === '/' || words[i] === ',') return null
+      return { size: words[i], lh: words[i + 1] === '/' ? words[i + 2] || null : null }
+    }
+
+    /**
+     * The raw `font` value of each rule in a <style> element's source. The
+     * CSSOM drops a `font: var(...)` shorthand once a longhand (for example
+     * font-family) follows it in the same block, so this is the fallback.
+     */
+    function sourceFonts(text) {
+      const map = new Map()
+      const clean = String(text || '').replace(/\/\*[\s\S]*?\*\//g, '')
+      const block = /([^{};]+)\{([^{}]*)\}/g
+      let m
+      while ((m = block.exec(clean)) !== null) {
+        const decl = /(?:^|;)\s*font\s*:\s*([^;]+)/i.exec(m[2])
+        if (decl !== null) map.set(normSelector(m[1]), decl[1].replace(/!\s*important\s*$/i, '').trim())
+      }
+      return map
+    }
+
+    function normSelector(sel) {
+      return String(sel).replace(/\s+/g, '').replace(/["']/g, '')
+    }
+
+    function listOf(items) {
+      try { return items ? Array.from(items) : [] } catch { return [] }
+    }
+
+    function safeRules(owner) {
+      try { return owner && owner.cssRules ? owner.cssRules : null } catch { return null }
+    }
+
+    /**
+     * Twin declarations for one style block ('' if it sets no size). An
+     * absolute size becomes `calc(size + offset)`; any other declared size
+     * (em, %, keywords, inherit) is repeated verbatim so that the relative
+     * order of all size declarations — and thus who wins a tie — is exactly
+     * the original one.
+     */
+    function mirrorDecls(style, tokens, lookupFont) {
+      const declared = new Set(listOf(style))
+      let parsed
+      const shorthand = () => {
+        if (parsed === undefined) {
+          const raw = String(style.getPropertyValue('font') || '').trim() || lookupFont() || ''
+          parsed = raw ? resolveFont(raw, tokens, 0) : null
+        }
+        return parsed
+      }
+      let out = ''
+      for (const prop of ['font-size', 'line-height']) {
+        if (!declared.has(prop)) continue
+        let value = String(style.getPropertyValue(prop) || '').trim()
+        let priority = style.getPropertyPriority(prop)
+        if (value === '') {
+          // Longhand still pending a `font: var(...)` substitution.
+          const resolved = shorthand()
+          value = resolved ? (prop === 'font-size' ? resolved.size : resolved.lh) || '' : ''
+          if (value === '') continue
+          priority = priority || style.getPropertyPriority('font')
+        }
+        const bang = priority === 'important' ? ' !important' : ''
+        const next = offsetable(value, prop === 'font-size', tokens) ? 'calc(' + value + ' + ' + OFFSET_REF + ')' : value
+        out += prop + ': ' + next + bang + '; '
+      }
+      return out
+    }
+
+    function collectTokens(rules, tokens) {
+      for (const rule of listOf(rules)) {
+        if (rule.style && typeof rule.selectorText === 'string') {
+          for (const prop of listOf(rule.style)) {
+            if (prop.startsWith('--')) tokens.set(prop, String(rule.style.getPropertyValue(prop)).trim())
+          }
+        }
+        if (rule.styleSheet) collectTokens(safeRules(rule.styleSheet), tokens)
+        else collectTokens(safeRules(rule), tokens)
+      }
+    }
+
+    function mirrorRules(rules, tokens, lookupFont) {
+      let out = ''
+      for (const rule of listOf(rules)) {
+        if (rule.style && typeof rule.selectorText === 'string') {
+          const decls = mirrorDecls(rule.style, tokens, () => lookupFont(rule.selectorText))
+          const nested = safeRules(rule)
+          const inner = nested ? mirrorRules(nested, tokens, lookupFont) : ''
+          // Blocks with only verbatim (relative) sizes are emitted too: they
+          // must still outrank earlier twins exactly as their originals did.
+          if (decls || inner) out += rule.selectorText + ' { ' + decls + inner + '}\n'
+        } else if (rule.styleSheet) {
+          // @import: mirror the imported sheet under the same media query.
+          const media = rule.media && rule.media.mediaText ? String(rule.media.mediaText) : ''
+          const inner = mirrorRules(safeRules(rule.styleSheet), tokens, lookupFont)
+          if (inner) out += media && media !== 'all' ? '@media ' + media + ' {\n' + inner + '}\n' : inner
+        } else {
+          const nested = safeRules(rule)
+          if (nested === null) continue
+          const text = String(rule.cssText || '')
+          const prelude = text.slice(0, text.indexOf('{')).trim()
+          if (!GROUP_PRELUDE.test(prelude)) continue
+          const inner = mirrorRules(nested, tokens, lookupFont)
+          if (inner) out += prelude + ' {\n' + inner + '}\n'
+        }
+      }
+      return out
+    }
+
+    function isOwnNode(node) {
+      return Boolean(node && node.nodeType === 1 && typeof node.hasAttribute === 'function' && node.hasAttribute('data-dsh-custom-fonts'))
+    }
+
+    /** Twin rules for the page's current stylesheets. Independent of N. */
+    function buildSizeCss() {
+      const sheets = listOf(document.styleSheets).filter((sheet) => !sheet.disabled && !isOwnNode(sheet.ownerNode))
+      const tokens = new Map()
+      for (const sheet of sheets) collectTokens(safeRules(sheet), tokens)
+      // Text with no declared size anywhere inherits from the root.
+      let out = 'html { font-size: calc(100% + ' + OFFSET_REF + '); }\n'
+      for (const sheet of sheets) {
+        const rules = safeRules(sheet)
+        if (rules === null) continue
+        let fonts = null
+        const lookupFont = (selector) => {
+          if (fonts === null) {
+            const node = sheet.ownerNode
+            fonts = node && String(node.tagName).toUpperCase() === 'STYLE' ? sourceFonts(node.textContent) : new Map()
+          }
+          return fonts.get(normSelector(selector)) || null
+        }
+        const inner = mirrorRules(rules, tokens, lookupFont)
+        const media = sheet.media && sheet.media.mediaText ? String(sheet.media.mediaText) : ''
+        if (inner) out += media && media !== 'all' ? '@media ' + media + ' {\n' + inner + '}\n' : inner
+      }
+      return out
+    }
+
+    /** Cached twin rules; dropped whenever the page's stylesheets change. */
+    let sizeCss = null
+
+    function formatOffset(offset) {
+      return (offset > 0 ? '+' : '') + offset + 'px'
+    }
+
+    // The font CSS. Order matters:
     //   1. UI stack (Latin → CJK fallback)
     //   2. code stack, later and equally specific, wins inside code regions
-    //   3. size offset, relative to each element's own size
+    //   3. the offset variable read by the twin rules
     function buildCss(o) {
       const enQ = quoteList(o.en)
       const zhQ = quoteList(o.zh)
       const codeQ = quoteList(o.code)
-      const offset = Number(o.size) || 0
+      const offset = normalizeSize(o.size)
       const rules = []
       const vars = []
       if (enQ) vars.push('--dsh-custom-fonts-en: ' + enQ)
       if (zhQ) vars.push('--dsh-custom-fonts-zh: ' + zhQ)
+      if (offset !== 0) vars.push(OFFSET_VAR + ': ' + offset + 'px')
       const uiStack = [enQ, zhQ].filter(Boolean).join(', ')
       if (uiStack) {
         rules.push('body, body * { font-family: ' + uiStack + ' !important; }')
@@ -94,26 +352,106 @@ window.__ModuleLoader__.load({
       if (codeQ) {
         rules.push('pre, code, kbd, samp { font-family: ' + codeQ + ' !important; }')
       }
-      if (offset !== 0) {
-        const sign = offset > 0 ? '+' : '-'
-        rules.push('body, body * { font-size: calc(1em ' + sign + ' ' + Math.abs(offset) + 'px) !important; }')
-      }
-      if (rules.length === 0) return null
+      if (rules.length === 0 && vars.length === 0) return null
       return (vars.length > 0 ? ':root { ' + vars.join('; ') + '; }\n' : '') + rules.join('\n')
     }
 
-    // Apply or revert everything: replaces the injected <style> each time.
+    // Two <style> elements, both kept at the end of <head> so their rules
+    // win ties against the originals: `styleTag` (fonts and the offset
+    // variable — tiny, rewritten on every edit) and `sizeTag` (the twin
+    // rules — large, rewritten only when the page's stylesheets change, so
+    // dragging the slider stays cheap). Offset 0 removes the twin rules
+    // entirely, leaving the page exactly as it was.
+    let sizeTag = null
+
+    function ensureTag(tag, kind, css) {
+      const el = tag !== null ? tag : document.createElement('style')
+      if (tag === null) el.setAttribute('data-dsh-custom-fonts', kind)
+      if (el.textContent !== css) el.textContent = css
+      return el
+    }
+
+    function keepLast(tags) {
+      const head = document.head
+      const live = tags.filter((tag) => tag !== null)
+      const tail = listOf(head.children).slice(-live.length)
+      if (live.length > 0 && live.every((tag, i) => tail[i] === tag)) return
+      for (const tag of live) { tag.remove(); head.appendChild(tag) }
+    }
+
     function applyFonts(next) {
       Object.assign(state, next)
-      if (styleTag !== null) { styleTag.remove(); styleTag = null }
       const css = buildCss(state)
-      if (css !== null) {
-        const tag = document.createElement('style')
-        tag.setAttribute('data-dsh-custom-fonts', '')
-        tag.textContent = css
-        document.head.appendChild(tag)
-        styleTag = tag
+      if (css === null) {
+        if (styleTag !== null) { styleTag.remove(); styleTag = null }
+      } else {
+        styleTag = ensureTag(styleTag, 'fonts', css)
       }
+      if (normalizeSize(state.size) === 0) {
+        if (sizeTag !== null) { sizeTag.remove(); sizeTag = null }
+      } else {
+        if (sizeCss === null) sizeCss = buildSizeCss()
+        sizeTag = ensureTag(sizeTag, 'size', sizeCss)
+      }
+      keepLast([sizeTag, styleTag])
+    }
+
+    function removeTags() {
+      if (styleTag !== null) { styleTag.remove(); styleTag = null }
+      if (sizeTag !== null) { sizeTag.remove(); sizeTag = null }
+    }
+
+    // Stylesheets added later (lazily loaded plugin CSS, <link> loads, HMR)
+    // need their own twins and must not end up after ours.
+    let observer = null
+    let rebuildTimer = null
+
+    function scheduleRebuild() {
+      sizeCss = null
+      if (rebuildTimer !== null) return
+      rebuildTimer = setTimeout(() => {
+        rebuildTimer = null
+        if (normalizeSize(state.size) !== 0) applyFonts({})
+      }, 50)
+    }
+
+    function tagOf(node) {
+      return node && typeof node.tagName === 'string' ? node.tagName.toUpperCase() : ''
+    }
+
+    function isStyleNode(node) {
+      const tag = tagOf(node)
+      return tag === 'STYLE' || (tag === 'LINK' && /stylesheet/i.test(String(node.rel || (node.getAttribute && node.getAttribute('rel')) || '')))
+    }
+
+    function watchStylesheets() {
+      if (observer !== null || typeof MutationObserver !== 'function') return
+      observer = new MutationObserver((records) => {
+        let foreign = false
+        for (const record of records) {
+          if (record.type === 'characterData') {
+            const parent = record.target && record.target.parentNode
+            if (isStyleNode(parent) && !isOwnNode(parent)) foreign = true
+            continue
+          }
+          if (isOwnNode(record.target)) continue
+          if (isStyleNode(record.target)) { foreign = true; continue }
+          for (const node of [...listOf(record.addedNodes), ...listOf(record.removedNodes)]) {
+            if (!isStyleNode(node) || isOwnNode(node)) continue
+            foreign = true
+            if (tagOf(node) === 'LINK' && typeof node.addEventListener === 'function') {
+              node.addEventListener('load', scheduleRebuild, { once: true })
+            }
+          }
+        }
+        if (foreign) scheduleRebuild()
+      })
+      observer.observe(document.head, { childList: true, subtree: true, characterData: true })
+    }
+
+    function unwatchStylesheets() {
+      if (observer !== null) { observer.disconnect(); observer = null }
+      if (rebuildTimer !== null) { clearTimeout(rebuildTimer); rebuildTimer = null }
     }
 
     // ---------------------------------------------------------------------
@@ -125,9 +463,14 @@ window.__ModuleLoader__.load({
     }
 
     function normalizeSize(value) {
-      const n = typeof value === 'number' ? value : Number(value)
+      // Numbers, or numeric strings from a hand-edited file; anything else
+      // (arrays, booleans, '2px', ...) means "no offset".
+      const n = typeof value === 'number' ? value
+        : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN
       if (!Number.isFinite(n)) return 0
-      return Math.min(SIZE_MAX, Math.max(SIZE_MIN, Math.round(n)))
+      // Snap to the slider grid (0.5px); `|| 0` folds -0 into 0.
+      const snapped = Math.round(n / SIZE_STEP) * SIZE_STEP
+      return Math.min(SIZE_MAX, Math.max(SIZE_MIN, snapped)) || 0
     }
 
     /** Coerce stored (possibly missing or malformed) values into safe settings. */
@@ -273,15 +616,20 @@ window.__ModuleLoader__.load({
     // Settings page
     // ---------------------------------------------------------------------
 
+    /** An inline size that follows the offset like stylesheet sizes do. */
+    function px(n) {
+      return 'calc(' + n + 'px + ' + OFFSET_REF + ')'
+    }
+
     const fieldLabelStyle = {
-      display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6,
+      display: 'block', fontSize: px(13), fontWeight: 600, marginBottom: 6,
       color: 'var(--dsw-alias-label-primary)',
     }
     const inputStyle = {
       width: '100%', boxSizing: 'border-box', padding: '8px 10px',
       borderRadius: 8, border: '1px solid var(--dsw-alias-border-l2)',
       background: 'var(--dsw-alias-bg-layer-2)', color: 'var(--dsw-alias-label-primary)',
-      fontSize: 14, outline: 'none',
+      fontSize: px(14), outline: 'none',
     }
 
     function Field(props) {
@@ -328,7 +676,7 @@ window.__ModuleLoader__.load({
       return createElement('div', { style: { maxWidth: 560, padding: '4px 2px' } },
         createElement('p', {
           style: {
-            margin: '0 0 18px', fontSize: 13, lineHeight: 1.7,
+            margin: '0 0 18px', fontSize: px(13), lineHeight: 1.7,
             color: 'var(--dsw-alias-label-secondary)',
           },
         },
@@ -364,7 +712,7 @@ window.__ModuleLoader__.load({
               createElement('span', {
                 style: { color: 'var(--dsw-alias-label-secondary)', fontWeight: 400 },
               },
-                size > 0 ? '+' + size + 'px' : size + 'px',
+                formatOffset(size),
               ),
             ),
             size !== 0
@@ -373,7 +721,7 @@ window.__ModuleLoader__.load({
                   title: 'Set the font size offset back to 0',
                   onClick: () => { update({ size: 0 }) },
                   style: {
-                    fontSize: 12, padding: '2px 10px', borderRadius: 6, cursor: 'pointer',
+                    fontSize: px(12), padding: '2px 10px', borderRadius: 6, cursor: 'pointer',
                     border: '1px solid var(--dsw-alias-border-l1)',
                     background: 'var(--dsw-alias-bg-layer-2)',
                     color: 'var(--dsw-alias-label-primary)',
@@ -383,8 +731,9 @@ window.__ModuleLoader__.load({
           ),
           createElement('input', {
             id: 'dsh-custom-fonts-size-input',
-            type: 'range', min: SIZE_MIN, max: SIZE_MAX, step: 1, value: size,
-            title: 'Adds this many pixels to every text size (-4 to +8)',
+            type: 'range', min: SIZE_MIN, max: SIZE_MAX, step: SIZE_STEP, value: size,
+            title: 'Adds this many pixels to every text size (-4 to +8, in 0.5px steps)',
+            'aria-valuetext': formatOffset(size),
             onChange: (e) => { update({ size: Number(e.target.value) }) },
             style: { width: '100%' },
           }),
@@ -394,7 +743,7 @@ window.__ModuleLoader__.load({
             marginTop: 4, padding: '14px 16px', borderRadius: 10,
             border: '1px solid var(--dsw-alias-border-l1)',
             background: 'var(--dsw-alias-bg-layer-1)',
-            fontSize: 15, lineHeight: 1.8, color: 'var(--dsw-alias-label-primary)',
+            fontSize: px(15), lineHeight: 1.8, color: 'var(--dsw-alias-label-primary)',
             fontFamily: uiStack || 'inherit',
           },
         },
@@ -412,7 +761,7 @@ window.__ModuleLoader__.load({
             marginTop: 8, padding: '10px 16px', borderRadius: 10,
             border: '1px solid var(--dsw-alias-border-l1)',
             background: 'var(--dsw-alias-bg-layer-1)',
-            fontSize: 13, lineHeight: 1.8, color: 'var(--dsw-alias-label-secondary)',
+            fontSize: px(13), lineHeight: 1.8, color: 'var(--dsw-alias-label-secondary)',
           },
         },
           createElement('code', {
@@ -436,14 +785,14 @@ window.__ModuleLoader__.load({
             marginTop: 16, padding: '8px 16px', borderRadius: 8, cursor: 'pointer',
             border: '1px solid var(--dsw-alias-border-l1)',
             background: 'var(--dsw-alias-bg-layer-2)',
-            color: 'var(--dsw-alias-label-primary)', fontSize: 13,
+            color: 'var(--dsw-alias-label-primary)', fontSize: px(13),
           },
         }, 'Restore defaults'),
         createElement('p', {
           role: 'status',
           'data-dsh-custom-fonts-status': saveStatus.kind,
           style: {
-            margin: '10px 0 0', fontSize: 12, lineHeight: 1.6,
+            margin: '10px 0 0', fontSize: px(12), lineHeight: 1.6,
             color: 'var(--dsw-alias-label-secondary)',
           },
         }, statusText()),
@@ -454,9 +803,14 @@ window.__ModuleLoader__.load({
       // `slots` and `configForms` are declared in `inject`, so Cordis only
       // runs apply() once both services are present.
       const slots = ctx.slots
-      // Remove the injected stylesheet when the plugin is unloaded.
-      ctx.effect(() => () => {
-        if (styleTag !== null) { styleTag.remove(); styleTag = null }
+      // Track stylesheet changes; remove the injected styles on unload.
+      ctx.effect(() => {
+        watchStylesheets()
+        return () => {
+          unwatchStylesheets()
+          removeTags()
+          sizeCss = null
+        }
       })
 
       // Stored preferences: adopt once on load, then follow every accepted

@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+- **Fix the font size offset growing with DOM depth.** The old `body, body * { font-size: calc(1em + N) }` rule added the offset again at every nesting level, so a small change made deeply nested text jump (at +2 px, 8-deep text went from 14 px to 38 px). The offset is now added once, only to rules that declare an absolute size, with line-height following along; relative sizes (`em`, `%`) keep their ratio, and an offset of 0 injects nothing.
+- The font size offset now moves in 0.5 px steps. Stored integer offsets keep working; non-numeric stored values fall back to 0.
+- Dragging the slider only updates a CSS variable, keeping the live preview fast. The settings page's own text follows the offset too.
+- Add `scripts/browser-check.mjs` (`npm run test:browser`), a headless-browser regression test for the offset.
 - Rename UI font fields to **Latin** and **CJK**, keeping stored setting keys compatible.
 - Add Japanese and Korean font suggestions and multilingual CJK previews.
 - Standardize documentation and package metadata on English.

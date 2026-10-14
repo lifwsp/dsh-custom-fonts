@@ -41,7 +41,8 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "test": "node scripts/verify.mjs"
+    "test": "node scripts/verify.mjs",
+    "test:browser": "node scripts/browser-check.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"

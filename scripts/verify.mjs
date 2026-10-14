@@ -10,8 +10,13 @@
 //      once and saved (debounced) through the shared config form, reset unsets
 //      the stored overrides, malformed/missing data is tolerated, and save
 //      failures are reported instead of thrown;
-//   4. UI text — the rendered settings page contains no Chinese outside the
+//   4. size offset — 0.5px steps, offset only declared absolute sizes (never
+//      a blanket `body *` rule, which compounded through DOM nesting), keep
+//      relative sizes untouched, and leave the page unchanged at 0;
+//   5. UI text — the rendered settings page contains no Chinese outside the
 //      font-name suggestions and the Chinese preview sample.
+//
+// scripts/browser-check.mjs measures the same behaviour in a real browser.
 //
 // The fake form mirrors the public surface of the real ConfigFormController in
 // @deepseek-ai/dsh-client-ui-settings: getSnapshot / subscribe / mutate.
@@ -45,17 +50,33 @@ function assert(condition, message) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // --- minimal DOM ---------------------------------------------------------
-function installDom() {
+// `sheets` are fake CSSOM stylesheets standing for the page's own CSS; each
+// rule is { selectorText, style: { prop: value | [value, 'important'] } }.
+function cssRule(selectorText, decls) {
+  const props = Object.keys(decls)
+  const style = {
+    length: props.length,
+    [Symbol.iterator]: () => props[Symbol.iterator](),
+    getPropertyValue: (p) => { const v = decls[p]; return v === undefined ? '' : Array.isArray(v) ? v[0] : v },
+    getPropertyPriority: (p) => Array.isArray(decls[p]) ? decls[p][1] : '',
+  }
+  return { selectorText, style, cssRules: null }
+}
+
+function installDom(sheets = []) {
   const head = {
     children: [],
+    get lastElementChild() { return this.children[this.children.length - 1] || null },
     appendChild(node) { node.parent = this; this.children.push(node) },
   }
   const listeners = new Map()
   globalThis.document = {
     head,
+    get styleSheets() { return sheets },
     createElement: (tag) => ({
-      tag, attrs: {}, textContent: '', parent: null,
+      tag, tagName: tag.toUpperCase(), nodeType: 1, attrs: {}, textContent: '', parent: null,
       setAttribute(key, value) { this.attrs[key] = value },
+      hasAttribute(key) { return key in this.attrs },
       remove() {
         if (this.parent === null) return
         this.parent.children = this.parent.children.filter((node) => node !== this)
@@ -69,6 +90,7 @@ function installDom() {
   }
   return {
     css: () => head.children.map((node) => node.textContent).join('\n'),
+    styleTexts: () => head.children.map((node) => node.textContent),
     styleCount: () => head.children.length,
     fire: (type) => listeners.get(type)?.(),
     hasListener: (type) => listeners.has(type),
@@ -135,8 +157,8 @@ function createFakeForm({ value, status = 'ready', mode = 'host', accept = true,
 }
 
 /** Load a fresh copy of the client bundle and mount it against `form`. */
-function mountClient(form) {
-  const dom = installDom()
+function mountClient(form, sheets) {
+  const dom = installDom(sheets)
   let handoff = null
   globalThis.window.__ModuleLoader__ = { load: (h) => { handoff = h } }
   // Evaluate the bundle as the browser does (a classic script), fresh each time.
@@ -213,7 +235,8 @@ await check('stored settings are restored and applied on load', async () => {
   const css = c.dom.css()
   assert(css.includes("body, body * { font-family: 'Segoe UI', '微软雅黑' !important; }"), 'UI stack not applied')
   assert(css.includes("pre, code, kbd, samp { font-family: 'Consolas' !important; }"), 'code font not applied')
-  assert(css.includes('calc(1em + 2px)'), 'size offset not applied')
+  assert(css.includes('--dsh-custom-fonts-size-offset: 2px'), 'size offset not applied')
+  assert(!css.includes('1em'), 'size offset must not use a blanket em rule')
   assert(c.input('dsh-custom-fonts-en-list').props.value === 'Segoe UI', 'input does not show stored value')
   assert(c.slider().props.value === 2, 'slider does not show stored value')
   assert(form.calls.length === 0, 'loading must not write')
@@ -234,7 +257,13 @@ await check('missing or malformed stored values fall back safely', async () => {
   const c = mountClient(form)
   assert(c.dom.styleCount() === 0, 'malformed values must not produce CSS')
   form.publish({ value: { size: 99 } })
-  assert(c.dom.css().includes('calc(1em + 8px)'), 'size must clamp to +8')
+  assert(c.dom.css().includes('--dsh-custom-fonts-size-offset: 8px'), 'size must clamp to +8')
+  form.publish({ value: { size: -1e9 } })
+  assert(c.dom.css().includes('--dsh-custom-fonts-size-offset: -4px'), 'size must clamp to -4')
+  for (const bad of [Infinity, NaN, '', '2px', {}, [3], true]) {
+    form.publish({ value: { size: bad } })
+    assert(!/size-offset: (?!0px)/.test(c.dom.css()) && !c.dom.css().includes('NaN') && !c.dom.css().includes('Infinity'), `bad size ${String(bad)} leaked into CSS`)
+  }
   form.publish({ value: null })
   assert(c.dom.styleCount() === 0, 'null value must revert to defaults')
   form.publish({ value: { en: "Evil'; } body { display: none } <style>" } })
@@ -355,6 +384,107 @@ await check('pagehide flushes a pending edit immediately', async () => {
   c.dom.fire('pagehide')
   await sleep(20)
   assert(form.stored.size === 5, 'pagehide did not flush')
+  c.unload()
+})
+
+// --- size offset ---------------------------------------------------------
+const PAGE_SHEETS = () => [{
+  ownerNode: { tagName: 'STYLE', nodeType: 1, hasAttribute: () => false, textContent: '' },
+  media: { mediaText: '' },
+  cssRules: [
+    cssRule('body', { '--dsw-font-xs-13': '13px/20px var(--dsw-font-family)', '--dsw-font-xs-13-font-size': '13px', '--dsw-font-xs-13-line-height': '20px', '--rel': '1.2em' }),
+    cssRule('.root', { 'font-size': '14px' }),
+    cssRule('.h1', { 'font-size': 'calc(21px + var(--dsh-content-font-delta))', 'line-height': 'calc(30px + var(--dsh-content-font-delta))' }),
+    cssRule('.nest', { 'font-size': '1em' }),
+    cssRule('.pct', { 'font-size': '100%' }),
+    cssRule('.code', { 'font-size': ['.875em', 'important'] }),
+    cssRule('.tok', { 'font-size': '', 'line-height': '', 'font': 'var(--dsw-font-xs-13)' }),
+    cssRule('.gap', { 'font-size': '0' }),
+    cssRule('.relvar', { 'font-size': 'var(--rel)' }),
+    cssRule('.unitless', { 'line-height': '1.5' }),
+    cssRule('.colour', { color: 'red' }),
+  ],
+}]
+
+await check('offset 0.5px steps: values snap to the 0.5px grid', async () => {
+  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0 } })
+  const c = mountClient(form, PAGE_SHEETS())
+  assert(c.slider().props.step === 0.5, 'slider step must be 0.5')
+  for (const [input, expected] of [['0.5', 0.5], ['-0.5', -0.5], ['1.25', 1.5], ['-2', -2], ['0.2', 0], ['-0.2', 0]]) {
+    c.slider().props.onChange({ target: { value: input } })
+    assert(c.slider().props.value === expected, `${input} -> ${c.slider().props.value}, expected ${expected}`)
+    assert(Object.is(c.slider().props.value, expected), `${input} must not yield -0`)
+  }
+  c.slider().props.onChange({ target: { value: '2.5' } })
+  assert(c.dom.css().includes('--dsh-custom-fonts-size-offset: 2.5px'), 'half-pixel offset not applied')
+  assert(collectText(c.page()).includes('+2.5px'), 'label must show +2.5px')
+  await sleep(SAVE_DELAY_MS + 100)
+  assert(form.stored.size === 2.5, `stored ${form.stored.size}`)
+  c.unload()
+})
+
+await check('stored integer offsets from older versions keep working', async () => {
+  const c = mountClient(createFakeForm({ value: { en: '', zh: '', code: '', size: 3 } }), PAGE_SHEETS())
+  assert(c.slider().props.value === 3 && c.dom.css().includes('--dsh-custom-fonts-size-offset: 3px'), 'integer offset not restored')
+  c.unload()
+})
+
+await check('offset 0 injects no size rules at all', async () => {
+  const c = mountClient(createFakeForm({ value: { en: 'Arial', zh: '', code: '', size: 0 } }), PAGE_SHEETS())
+  const css = c.dom.css()
+  assert(!css.includes('font-size') && !css.includes('size-offset'), `unexpected size CSS at 0:\n${css}`)
+  c.unload()
+})
+
+await check('regression: offset never targets every element with a relative size', async () => {
+  for (const size of [0.5, -0.5, 2, -2, 8, -4]) {
+    const c = mountClient(createFakeForm({ value: { en: 'Arial', zh: 'Meiryo', code: 'Consolas', size } }), PAGE_SHEETS())
+    const css = c.dom.css()
+    // The bug: `body, body * { font-size: calc(1em + N) }` compounds per level.
+    for (const block of css.split('}')) {
+      if (/(^|[\s,])(\*|body \*)\s*\{/.test(block + '{') && /font-size/.test(block)) throw new Error(`blanket font-size rule at ${size}: ${block}`)
+    }
+    assert(!/font-size:\s*calc\(\s*1em/.test(css), 'calc(1em + N) is cumulative')
+    assert(css.includes('--dsh-custom-fonts-size-offset: ' + size + 'px'), `offset variable missing for ${size}`)
+    c.unload()
+  }
+})
+
+await check('offset twins: absolute sizes shift, relative sizes are repeated verbatim', async () => {
+  const c = mountClient(createFakeForm({ value: { en: '', zh: '', code: '', size: 2 } }), PAGE_SHEETS())
+  const css = c.dom.css()
+  const OFF = 'var(--dsh-custom-fonts-size-offset, 0px)'
+  const rule = (sel) => { const m = new RegExp('(^|\\n)' + sel.replace('.', '\\.') + ' \\{([^}]*)\\}').exec(css); return m ? m[2] : null }
+  assert(css.includes('html { font-size: calc(100% + ' + OFF + '); }'), 'root size not offset')
+  assert(rule('.root').includes('font-size: calc(14px + ' + OFF + ')'), '.root not offset')
+  assert(rule('.h1').includes('font-size: calc(calc(21px + var(--dsh-content-font-delta)) + ' + OFF + ')'), '.h1 size not offset')
+  assert(rule('.h1').includes('line-height: calc(calc(30px + var(--dsh-content-font-delta)) + ' + OFF + ')'), '.h1 line-height not offset')
+  assert(rule('.tok').includes('font-size: calc(var(--dsw-font-xs-13-font-size) + ' + OFF + ')'), 'font: var(--token) size not offset')
+  assert(rule('.tok').includes('line-height: calc(var(--dsw-font-xs-13-line-height) + ' + OFF + ')'), 'font: var(--token) line-height not offset')
+  // Relative sizes inherit the parent's already-offset size: offsetting
+  // them again would compound. They are repeated only to keep tie order.
+  assert(rule('.nest').trim() === 'font-size: 1em;', `.nest changed: ${rule('.nest')}`)
+  assert(rule('.pct').trim() === 'font-size: 100%;', `.pct changed: ${rule('.pct')}`)
+  assert(rule('.code').trim() === 'font-size: .875em !important;', `.code changed: ${rule('.code')}`)
+  assert(rule('.relvar').trim() === 'font-size: var(--rel);', 'a variable holding em must not be offset')
+  assert(rule('.gap').trim() === 'font-size: 0;', 'zero sizes must stay zero')
+  assert(rule('.unitless').trim() === 'line-height: 1.5;', 'unitless line-height must not be offset')
+  assert(rule('.colour') === null, 'rules without sizes must not be mirrored')
+  // Changing the offset only rewrites the variable, not the twin rules.
+  const twins = c.dom.styleTexts().find((t) => t.includes('html { font-size'))
+  c.slider().props.onChange({ target: { value: '-1.5' } })
+  assert(c.dom.styleTexts().find((t) => t.includes('html { font-size')) === twins, 'twin rules must not be rebuilt per slider step')
+  assert(c.dom.css().includes('--dsh-custom-fonts-size-offset: -1.5px'), 'negative half-pixel offset missing')
+  c.slider().props.onChange({ target: { value: '0' } })
+  assert(!c.dom.css().includes('font-size'), 'twins must be removed at 0')
+  await sleep(SAVE_DELAY_MS + 100)
+  c.unload()
+})
+
+await check('settings page sizes follow the offset (live preview)', async () => {
+  const c = mountClient(createFakeForm({ value: { en: '', zh: '', code: '', size: 1 } }), PAGE_SHEETS())
+  const sizes = findAll(c.page(), (n) => n.props && n.props.style && n.props.style.fontSize !== undefined).map((n) => n.props.style.fontSize)
+  assert(sizes.length > 0 && sizes.every((s) => typeof s === 'string' && s.includes('--dsh-custom-fonts-size-offset')), `inline sizes: ${sizes}`)
   c.unload()
 })
 
