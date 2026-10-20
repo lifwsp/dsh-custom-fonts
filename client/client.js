@@ -876,6 +876,12 @@ window.__ModuleLoader__.load({
       const uiStack = [enQ, zhQ].filter(Boolean).join(', ')
       if (uiStack) {
         rules.push('body, body * { font-family: ' + uiStack + ' !important; }')
+        // Ordered-list numbers are right-aligned, and many UI fonts have digits
+        // of different widths (no tabular figures), so "1." sits further in than
+        // "4.". Only the number (the ::marker) is switched to the system font
+        // with tabular figures; the item text keeps the chosen font. `body *`
+        // does not match pseudo-elements, so this does not fight the rule above.
+        rules.push('[data-chat-flow] ol > li::marker { font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif !important; font-variant-numeric: tabular-nums; }')
       }
       if (codeQ) {
         rules.push('pre, code, kbd, samp { font-family: ' + codeQ + ' !important; }')

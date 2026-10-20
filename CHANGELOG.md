@@ -4,6 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+- **Even numbers in chat ordered lists.** When a UI font is set, the numbers of ordered lists in the chat (`1.`, `2.`, …) are drawn in the system font with tabular figures, so fonts whose digits differ in width (for example LINE Seed JP) no longer make `1.` sit further in than `4.`. Only the number changes; the item text, bullets and everything outside the chat keep the chosen font.
 - **Installed fonts without Chrome.** The Host now lists the fonts installed on its computer and the settings page uses that list whenever it is opened on the same machine, so suggestions work in Safari/WKWebView (including the macOS desktop app) and in Firefox, with no permission prompt. Descriptions are cached per font file. Other devices keep the browser-side **Detect installed fonts** path.
 - **Field-aware suggestions.** Font files are read for CJK coverage (OS/2) and fixed pitch (measured advance widths), so the CJK field lists Japanese/Chinese/Korean fonts first and the code field lists monospaced fonts first. Suggestions carry JP/SC/TC/KR/Mono tags. Typographic family names (nameID 16) are preferred, and Mac-platform names are read too.
 
