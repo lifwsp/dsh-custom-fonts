@@ -150,7 +150,7 @@ function createFakeForm({ value, status = 'ready', mode = 'host', accept = true,
         if (op.op === 'set') form.stored[op.path[0]] = op.value
         else delete form.stored[op.path[0]]
       }
-      const defaults = { en: '', zh: '', code: '', size: 0 }
+      const defaults = { en: '', zh: '', code: '', size: 0, tightFix: false }
       form.publish({ value: { ...defaults, ...form.stored }, revision: form.snap.revision + 1 })
       return true
     },
@@ -207,21 +207,21 @@ await check('host half exposes { name, inject: [], apply, Config }', async () =>
   assert(mod.Config && typeof mod.Config.toJSON === 'function', 'Config schema missing')
 })
 
-await check('host Config: four volatile fields with safe defaults', async () => {
+await check('host Config: five volatile fields with safe defaults', async () => {
   const { Config } = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
   const fields = Config.dict
-  assert(JSON.stringify(Object.keys(fields)) === '["en","zh","code","size"]', 'unexpected fields')
+  assert(JSON.stringify(Object.keys(fields)) === '["en","zh","code","size","tightFix"]', 'unexpected fields')
   for (const [key, field] of Object.entries(fields)) {
     assert(field.meta.volatile === true, `${key} is not volatile`)
     assert(typeof field.meta.description === 'string' && !/[\u3400-\u9fff]/.test(field.meta.description), `${key} needs an English description`)
   }
   const defaults = Object.fromEntries(Object.entries(fields).map(([key, field]) => [key, field.meta.default]))
-  assert(JSON.stringify(defaults) === '{"en":"","zh":"","code":"","size":0}', `defaults changed: ${JSON.stringify(defaults)}`)
+  assert(JSON.stringify(defaults) === '{"en":"","zh":"","code":"","size":0,"tightFix":false}', `defaults changed: ${JSON.stringify(defaults)}`)
 })
 
 // --- client half ---------------------------------------------------------
 await check('client registers surface, Fonts page, and cleanup', async () => {
-  const c = mountClient(createFakeForm({ value: { en: '', zh: '', code: '', size: 0 } }))
+  const c = mountClient(createFakeForm({ value: { en: '', zh: '', code: '', size: 0, tightFix: false } }))
   assert(c.surface.name === 'dsh-custom-fonts', `name is ${c.surface.name}`)
   assert(JSON.stringify(c.surface.inject) === '["slots","configForms"]', 'inject must declare slots and configForms')
   const { opts } = c.registrations[0]
@@ -231,7 +231,7 @@ await check('client registers surface, Fonts page, and cleanup', async () => {
 })
 
 await check('first run: no stored data produces no stylesheet', async () => {
-  const c = mountClient(createFakeForm({ value: { en: '', zh: '', code: '', size: 0 } }))
+  const c = mountClient(createFakeForm({ value: { en: '', zh: '', code: '', size: 0, tightFix: false } }))
   assert(c.dom.styleCount() === 0, 'unexpected stylesheet for default settings')
   c.unload()
 })
@@ -254,7 +254,7 @@ await check('settings loaded after mount (status loading -> ready) are applied',
   const form = createFakeForm({ status: 'loading', value: undefined })
   const c = mountClient(form)
   assert(c.dom.styleCount() === 0, 'nothing should apply while loading')
-  form.publish({ status: 'ready', value: { en: 'Arial', zh: '', code: '', size: 0 } })
+  form.publish({ status: 'ready', value: { en: 'Arial', zh: '', code: '', size: 0, tightFix: false } })
   assert(c.dom.css().includes("'Arial'"), 'late-arriving settings not applied')
   c.unload()
 })
@@ -279,7 +279,7 @@ await check('missing or malformed stored values fall back safely', async () => {
 })
 
 await check('edits apply immediately and are saved once after the quiet period', async () => {
-  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0 } })
+  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0, tightFix: false } })
   const c = mountClient(form)
   for (const value of ['J', 'Je', 'JetBrains Mono']) c.input('dsh-custom-fonts-code-list').props.onChange({ target: { value } })
   assert(c.dom.css().includes("'JetBrains Mono'"), 'edit not applied immediately')
@@ -293,7 +293,7 @@ await check('edits apply immediately and are saved once after the quiet period',
 })
 
 await check('several fields edited together are saved in one atomic write', async () => {
-  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0 } })
+  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0, tightFix: false } })
   const c = mountClient(form)
   c.input('dsh-custom-fonts-en-list').props.onChange({ target: { value: 'Georgia' } })
   c.slider().props.onChange({ target: { value: '3' } })
@@ -304,10 +304,10 @@ await check('several fields edited together are saved in one atomic write', asyn
 })
 
 await check('a Host echo does not undo an edit that is still being typed', async () => {
-  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0 } })
+  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0, tightFix: false } })
   const c = mountClient(form)
   c.input('dsh-custom-fonts-en-list').props.onChange({ target: { value: 'Verd' } })
-  form.publish({ value: { en: '', zh: '', code: '', size: 0 } }) // unrelated refresh
+  form.publish({ value: { en: '', zh: '', code: '', size: 0, tightFix: false } }) // unrelated refresh
   assert(c.dom.css().includes("'Verd'"), 'pending edit was overwritten by a refresh')
   await sleep(SAVE_DELAY_MS + 100)
   c.unload()
@@ -332,7 +332,7 @@ await check('"Restore defaults" clears the page and unsets every stored field', 
   await sleep(20)
   assert(c.dom.styleCount() === 0, 'styles not removed')
   assert(form.calls.length === 1, `expected one write (pending edit cancelled), got ${form.calls.length}`)
-  assert(form.calls[0].every((op) => op.op === 'unset') && form.calls[0].length === 4, 'reset must unset all four fields')
+  assert(form.calls[0].every((op) => op.op === 'unset') && form.calls[0].length === 5, 'reset must unset all five fields')
   assert(Object.keys(form.stored).length === 0, 'stored overrides remain')
   await sleep(SAVE_DELAY_MS + 100)
   assert(form.calls.length === 1, 'cancelled edit was written after reset')
@@ -340,7 +340,7 @@ await check('"Restore defaults" clears the page and unsets every stored field', 
 })
 
 await check('save failure is reported and does not throw', async () => {
-  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0 }, throws: new Error('disk full') })
+  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0, tightFix: false }, throws: new Error('disk full') })
   const c = mountClient(form)
   c.input('dsh-custom-fonts-en-list').props.onChange({ target: { value: 'Arial' } })
   await sleep(SAVE_DELAY_MS + 100)
@@ -351,7 +351,7 @@ await check('save failure is reported and does not throw', async () => {
 })
 
 await check('refused write (conflict) is reported and the stored value is re-adopted', async () => {
-  const form = createFakeForm({ value: { en: 'Arial', zh: '', code: '', size: 0 }, accept: false })
+  const form = createFakeForm({ value: { en: 'Arial', zh: '', code: '', size: 0, tightFix: false }, accept: false })
   const c = mountClient(form)
   c.input('dsh-custom-fonts-en-list').props.onChange({ target: { value: 'Georgia' } })
   await sleep(SAVE_DELAY_MS + 100)
@@ -372,7 +372,7 @@ await check('non-persistent connection: edits still apply, user is told they are
 })
 
 await check('unload flushes a pending edit and removes listeners and styles', async () => {
-  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0 } })
+  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0, tightFix: false } })
   const c = mountClient(form)
   c.input('dsh-custom-fonts-en-list').props.onChange({ target: { value: 'Calibri' } })
   assert(c.dom.hasListener('pagehide'), 'pagehide flush not registered')
@@ -385,13 +385,26 @@ await check('unload flushes a pending edit and removes listeners and styles', as
 })
 
 await check('pagehide flushes a pending edit immediately', async () => {
-  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0 } })
+  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0, tightFix: false } })
   const c = mountClient(form)
   c.slider().props.onChange({ target: { value: '5' } })
   c.dom.fire('pagehide')
   await sleep(20)
   assert(form.stored.size === 5, 'pagehide did not flush')
   c.unload()
+})
+
+await check('tightFix: clips session titles with a fade mask, off by default', async () => {
+  const off = mountClient(createFakeForm({ value: { en: '', zh: '', code: '', size: 0, tightFix: false } }))
+  assert(off.dom.styleCount() === 0, 'tightFix off must inject nothing')
+  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0, tightFix: true } })
+  const c = mountClient(form)
+  const css = c.dom.css()
+  assert(css.includes('text-overflow: clip !important') && css.includes('mask-image'), 'tightFix rule missing')
+  assert(!/mask-image[^;]*!important/.test(css), 'mask must not be !important (host marquee masks must win)')
+  c.input('dsh-custom-fonts-tightfix').props.onChange({ target: { checked: false } })
+  await sleep(20)
+  assert(!c.dom.css().includes('text-overflow'), 'tightFix not removed when unchecked')
 })
 
 // --- size offset ---------------------------------------------------------
@@ -414,7 +427,7 @@ const PAGE_SHEETS = () => [{
 }]
 
 await check('offset 0.5px steps: values snap to the 0.5px grid', async () => {
-  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0 } })
+  const form = createFakeForm({ value: { en: '', zh: '', code: '', size: 0, tightFix: false } })
   const c = mountClient(form, PAGE_SHEETS())
   assert(c.slider().props.step === 0.5, 'slider step must be 0.5')
   for (const [input, expected] of [['0.5', 0.5], ['-0.5', -0.5], ['1.25', 1.5], ['-2', -2], ['0.2', 0], ['-0.2', 0]]) {
@@ -437,7 +450,7 @@ await check('stored integer offsets from older versions keep working', async () 
 })
 
 await check('offset 0 injects no size rules at all', async () => {
-  const c = mountClient(createFakeForm({ value: { en: 'Arial', zh: '', code: '', size: 0 } }), PAGE_SHEETS())
+  const c = mountClient(createFakeForm({ value: { en: 'Arial', zh: '', code: '', size: 0, tightFix: false } }), PAGE_SHEETS())
   const css = c.dom.css()
   assert(!css.includes('font-size') && !css.includes('size-offset'), `unexpected size CSS at 0:\n${css}`)
   c.unload()
@@ -666,7 +679,7 @@ await check('client: a loopback page lists the Host fonts; a remote page does no
   ]
   const calls = []
   const rpc = { call: async (channel, method, payload) => { calls.push([channel, method]); return { ok: true, value: { families, files: 2, ms: 1 } } } }
-  const local = mountClient(createFakeForm({ value: { en: '', zh: '', code: '', size: 0 } }), undefined, { isLoopback: true, rpc })
+  const local = mountClient(createFakeForm({ value: { en: '', zh: '', code: '', size: 0, tightFix: false } }), undefined, { isLoopback: true, rpc })
   const text = () => collectText(local.page()).join(' ')
   assert(text().includes('Detect installed fonts'), 'button shown before the first scan')
   local.button('Detect installed fonts').props.onClick()
@@ -677,7 +690,7 @@ await check('client: a loopback page lists the Host fonts; a remote page does no
   local.unload()
 
   const remoteCalls = []
-  const remote = mountClient(createFakeForm({ value: { en: '', zh: '', code: '', size: 0 } }), undefined,
+  const remote = mountClient(createFakeForm({ value: { en: '', zh: '', code: '', size: 0, tightFix: false } }), undefined,
     { isLoopback: false, rpc: { call: async () => { remoteCalls.push(1); return { ok: false } } } })
   remote.button('Detect installed fonts').props.onClick()
   await sleep(0)

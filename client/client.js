@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
     /** Settings namespace owned by this plugin (equals its loader entry id). */
     const NAMESPACE = 'dsh-custom-fonts'
     /** Empty font means "use the product default"; size 0 means "no offset". */
-    const DEFAULTS = Object.freeze({ en: '', zh: '', code: '', size: 0 })
+    const DEFAULTS = Object.freeze({ en: '', zh: '', code: '', size: 0, tightFix: false })
     const FIELDS = Object.keys(DEFAULTS)
     const SIZE_MIN = -4
     const SIZE_MAX = 8
@@ -880,6 +880,15 @@ window.__ModuleLoader__.load({
       if (codeQ) {
         rules.push('pre, code, kbd, samp { font-family: ' + codeQ + ' !important; }')
       }
+      // WebKit (Safari, the macOS desktop app) lays out text more tightly in a
+      // `text-overflow: ellipsis` box than in a `clip` one, which squeezes
+      // Latin digits and kanji in session titles. Clipping with a fade-out
+      // mask looks the same at rest and keeps the spacing natural. The mask
+      // is not `!important`, so the host's own marquee masks (more specific)
+      // still win while a row is hovered.
+      if (o.tightFix === true) {
+        rules.push('[class*="sessionRow"] [class*="title"] { text-overflow: clip !important; mask-image: linear-gradient(270deg, #0000, #000 12px); }')
+      }
       if (rules.length === 0 && vars.length === 0) return null
       return (vars.length > 0 ? ':root { ' + vars.join('; ') + '; }\n' : '') + rules.join('\n')
     }
@@ -1009,6 +1018,7 @@ window.__ModuleLoader__.load({
         zh: normalizeFont(o.zh),
         code: normalizeFont(o.code),
         size: normalizeSize(o.size),
+        tightFix: o.tightFix === true,
       }
     }
 
@@ -1118,7 +1128,9 @@ window.__ModuleLoader__.load({
       const clean = {}
       for (const [key, value] of Object.entries(patch)) {
         if (!FIELDS.includes(key)) continue
-        clean[key] = key === 'size' ? normalizeSize(value) : normalizeFont(value)
+        clean[key] = key === 'size' ? normalizeSize(value)
+          : key === 'tightFix' ? value === true
+          : normalizeFont(value)
       }
       Object.assign(pending, clean)
       applyFonts(clean)
@@ -1318,7 +1330,7 @@ window.__ModuleLoader__.load({
     }
 
     function FontPage() {
-      const { en, zh, code, size } = useFontSettings()
+      const { en, zh, code, size, tightFix } = useFontSettings()
       useEffect(() => { autoScan() }, [])
       const uiStack = [quoteList(en), quoteList(zh)].filter(Boolean).join(', ')
       const codeQ = quoteList(code)
@@ -1387,6 +1399,26 @@ window.__ModuleLoader__.load({
             onChange: (e) => { update({ size: Number(e.target.value) }) },
             style: { width: '100%' },
           }),
+        ),
+        createElement('label', {
+          style: {
+            display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 16,
+            fontSize: px(13), lineHeight: 1.6, cursor: 'pointer',
+            color: 'var(--dsw-alias-label-primary)',
+          },
+        },
+          createElement('input', {
+            id: 'dsh-custom-fonts-tightfix-input',
+            type: 'checkbox', checked: tightFix === true,
+            onChange: (e) => { update({ tightFix: e.target.checked }) },
+            style: { marginTop: 4 },
+          }),
+          createElement('span', null,
+            'Fix tight letter spacing in session titles (Safari / macOS app)',
+            createElement('span', {
+              style: { display: 'block', color: 'var(--dsw-alias-label-secondary)', fontSize: px(12) },
+            }, 'Truncated session titles fade out at the edge instead of ending in "…", which keeps WebKit from squeezing the characters together.'),
+          ),
         ),
         createElement('div', {
           style: {

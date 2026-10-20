@@ -10,6 +10,7 @@ Change the **Latin** and **CJK** UI fonts, the **code font**, and the **text siz
 
 - **Separate fonts** for Latin text, CJK text (Chinese, Japanese, Korean), and code.
 - **Font size offset** from -4 to +8 px, applied evenly to all text.
+- **Tight-spacing fix for session titles** (optional, for Safari and the macOS desktop app): WebKit squeezes characters in truncated titles; with this on, titles fade out at the edge instead of ending in "…".
 - **Live preview** with Latin, Japanese, Chinese, Korean, and code samples.
 - **Installed-font suggestions** in any browser on the computer DSH runs on (including the macOS desktop app), each shown in its own typeface. Fonts that fit the field come first (Japanese/Chinese/Korean fonts for CJK, monospaced fonts for code), with JP/SC/TC/KR/Mono tags. Japanese font names such as 游ゴシック work too.
 - **Saved automatically** in your DSH profile and restored after a reload or restart.
